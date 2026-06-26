@@ -90,6 +90,45 @@ const ev = await api('GET', '/v1/account/events', token);
 check('events recorded', ev.status === 200 && (ev.body?.events?.length ?? 0) >= 1, `count=${ev.body?.events?.length}`);
 check('GET /v1/health (legacy still ok)', (await api('GET', '/v1/health')).status === 200);
 
+// ---- NEOBANK SURFACE (payees, FX quote, sub-accounts, invoices, scheduled, cards, webhooks, statement) ----
+const pe = await api('POST', '/v1/account/payees', token, { name: 'Acme Supplier', party: recip, currency: 'USDC' });
+check('add payee', pe.status === 201 && !!pe.body?.payee?.id);
+const pl = await api('GET', '/v1/account/payees', token);
+check('list payees', pl.status === 200 && (pl.body?.payees?.length ?? 0) >= 1);
+
+const q = await api('GET', '/v1/account/fx/quote?from=USDC&to=EURC&amount=1000', token);
+check('FX quote USDC→EURC', q.status === 200 && q.body?.rate > 0 && q.body?.receive === +(1000 * q.body.rate).toFixed(2), `rate=${q.body?.rate} receive=${q.body?.receive}`);
+
+const sa = await api('POST', '/v1/account/sub-accounts', token, { name: 'Payroll pot' });
+check('create sub-account', sa.status === 201 && !!sa.body?.subAccount?.id);
+const mv = await api('POST', `/v1/account/sub-accounts/${sa.body?.subAccount?.id}/move`, token, { amount: 500, currency: 'USDC', direction: 'in' });
+check('move 500 USDC → sub-account (real)', mv.status === 200 && !!mv.body?.updateId, mv.body?.error || '');
+
+const inv = await api('POST', '/v1/account/invoices', token, { amount: 250, currency: 'USDC', counterparty: 'Globex', description: 'Consulting' });
+check('create invoice', inv.status === 201 && inv.body?.invoice?.number?.startsWith('INV-'));
+const paid = await api('POST', `/v1/account/invoices/${inv.body?.invoice?.id}/pay`, token, {});
+check('pay invoice (settled)', paid.status === 200 && paid.body?.invoice?.status === 'paid', paid.body?.error || '');
+
+const sc = await api('POST', '/v1/account/scheduled', token, { type: 'transfer', label: 'Rent', intervalDays: 30, payload: { to: recip, amount: 10, currency: 'USDC' } });
+check('create scheduled payment', sc.status === 201 && !!sc.body?.scheduled?.id);
+const scr = await api('POST', `/v1/account/scheduled/${sc.body?.scheduled?.id}/run`, token, {});
+check('run scheduled (real transfer)', scr.status === 200 && !!scr.body?.updateId, scr.body?.error || '');
+
+const card = await api('POST', '/v1/account/cards', token, { label: 'Ops card', spendLimit: 5000 });
+check('issue virtual card', card.status === 201 && /^\d{4}$/.test(card.body?.card?.last4 || ''));
+const frz = await api('POST', `/v1/account/cards/${card.body?.card?.id}/freeze`, token, {});
+check('freeze card', frz.status === 200 && frz.body?.card?.status === 'frozen');
+
+const wh = await api('POST', '/v1/account/webhooks', token, { url: 'https://example.com/hook', events: ['*'] });
+check('add webhook', wh.status === 201 && !!wh.body?.webhook?.id);
+check('list webhooks', (await api('GET', '/v1/account/webhooks', token)).body?.webhooks?.length >= 1);
+check('delete webhook', (await api('DELETE', `/v1/account/webhooks/${wh.body?.webhook?.id}`, token)).status === 200);
+
+const st = await api('GET', '/v1/account/statement', token);
+check('statement', st.status === 200 && !!st.body?.balances && typeof st.body?.activity?.transfers === 'number', `events=${st.body?.totalEvents}`);
+const txs = await api('GET', '/v1/account/transactions', token);
+check('transactions list', txs.status === 200 && (txs.body?.transactions?.length ?? 0) >= 1);
+
 console.log(log.join('\n'));
 console.log(`\n${pass}/${pass + fail} passed${fail ? `  (${fail} FAILED)` : '  — all green'}`);
 process.exit(fail ? 1 : 0);

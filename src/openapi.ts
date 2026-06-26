@@ -103,5 +103,52 @@ export const openapi = {
       post: { tags: ['Lending'], security: [{ session: [] }], summary: 'Draw working capital against the credit line', requestBody: body({ amount: N, termDays: N }, ['amount']), responses: { '201': { description: 'loan' } } },
     },
     '/v1/account/loans/{id}/repay': { post: { tags: ['Lending'], security: [{ session: [] }], summary: 'Repay a loan', parameters: [{ name: 'id', in: 'path', required: true, schema: S }], requestBody: body({ amount: N }, ['amount']), responses: ok('ok') } },
+
+    // ---- Neobank: payees, FX quote, sub-accounts ----
+    '/v1/account/payees': {
+      get: { tags: ['Payments'], security: [{ session: [] }], summary: 'List saved payees', responses: ok('payees') },
+      post: { tags: ['Payments'], security: [{ session: [] }], summary: 'Add a payee (beneficiary)', requestBody: body({ name: S, party: S, currency: S }, ['name', 'party']), responses: { '201': { description: 'payee' } } },
+    },
+    '/v1/account/payees/{id}': { delete: { tags: ['Payments'], security: [{ session: [] }], summary: 'Remove a payee', parameters: [{ name: 'id', in: 'path', required: true, schema: S }], responses: ok('ok') } },
+    '/v1/account/fx/quote': { get: { tags: ['Treasury'], security: [{ session: [] }], summary: 'FX quote (operator-quoted)', parameters: [{ name: 'from', in: 'query', schema: S }, { name: 'to', in: 'query', schema: S }, { name: 'amount', in: 'query', schema: N }], responses: ok('quote') } },
+    '/v1/account/sub-accounts': {
+      get: { tags: ['Payments'], security: [{ session: [] }], summary: 'List sub-accounts (pots) with balances', responses: ok('subAccounts') },
+      post: { tags: ['Payments'], security: [{ session: [] }], summary: 'Create a sub-account (its own Canton party)', requestBody: body({ name: S }, ['name']), responses: { '201': { description: 'subAccount' } } },
+    },
+    '/v1/account/sub-accounts/{id}/move': { post: { tags: ['Payments'], security: [{ session: [] }], summary: 'Move funds between main and a pot', parameters: [{ name: 'id', in: 'path', required: true, schema: S }], requestBody: body({ amount: N, currency: S, direction: S }, ['amount']), responses: ok('ok') } },
+
+    // ---- Neobank: invoices ----
+    '/v1/account/invoices': {
+      get: { tags: ['Invoices'], security: [{ session: [] }], summary: 'List invoices', responses: ok('invoices') },
+      post: { tags: ['Invoices'], security: [{ session: [] }], summary: 'Create an invoice / payment request', requestBody: body({ amount: N, currency: S, counterparty: S, description: S }, ['amount']), responses: { '201': { description: 'invoice' } } },
+    },
+    '/v1/account/invoices/{id}/pay': { post: { tags: ['Invoices'], security: [{ session: [] }], summary: 'Settle an invoice on-ledger', parameters: [{ name: 'id', in: 'path', required: true, schema: S }], requestBody: body({ from: S }), responses: ok('invoice') } },
+
+    // ---- Neobank: scheduled payments ----
+    '/v1/account/scheduled': {
+      get: { tags: ['Scheduled'], security: [{ session: [] }], summary: 'List scheduled payments', responses: ok('scheduled') },
+      post: { tags: ['Scheduled'], security: [{ session: [] }], summary: 'Create a standing order / recurring payroll', requestBody: body({ type: S, label: S, intervalDays: N, payload: { type: 'object' } }, ['type']), responses: { '201': { description: 'scheduled' } } },
+    },
+    '/v1/account/scheduled/run-due': { post: { tags: ['Scheduled'], security: [{ session: [] }], summary: 'Run all due schedules now', responses: ok('ran') } },
+    '/v1/account/scheduled/{id}/run': { post: { tags: ['Scheduled'], security: [{ session: [] }], summary: 'Run a schedule now', parameters: [{ name: 'id', in: 'path', required: true, schema: S }], responses: ok('ok') } },
+    '/v1/account/scheduled/{id}/pause': { post: { tags: ['Scheduled'], security: [{ session: [] }], summary: 'Pause a schedule', parameters: [{ name: 'id', in: 'path', required: true, schema: S }], responses: ok('ok') } },
+    '/v1/account/scheduled/{id}/resume': { post: { tags: ['Scheduled'], security: [{ session: [] }], summary: 'Resume a schedule', parameters: [{ name: 'id', in: 'path', required: true, schema: S }], responses: ok('ok') } },
+
+    // ---- Neobank: cards ----
+    '/v1/account/cards': {
+      get: { tags: ['Cards'], security: [{ session: [] }], summary: 'List virtual cards', responses: ok('cards') },
+      post: { tags: ['Cards'], security: [{ session: [] }], summary: 'Issue a virtual card (modeled; network issuance is external)', requestBody: body({ label: S, currency: S, spendLimit: N, subAccountId: S }), responses: { '201': { description: 'card' } } },
+    },
+    '/v1/account/cards/{id}/freeze': { post: { tags: ['Cards'], security: [{ session: [] }], summary: 'Freeze a card', parameters: [{ name: 'id', in: 'path', required: true, schema: S }], responses: ok('card') } },
+    '/v1/account/cards/{id}/unfreeze': { post: { tags: ['Cards'], security: [{ session: [] }], summary: 'Unfreeze a card', parameters: [{ name: 'id', in: 'path', required: true, schema: S }], responses: ok('card') } },
+
+    // ---- Neobank: webhooks, transactions, statement ----
+    '/v1/account/webhooks': {
+      get: { tags: ['Accounts'], security: [{ session: [] }], summary: 'List webhooks', responses: ok('webhooks') },
+      post: { tags: ['Accounts'], security: [{ session: [] }], summary: 'Subscribe a webhook', requestBody: body({ url: S, events: { type: 'array' } }, ['url']), responses: { '201': { description: 'webhook' } } },
+    },
+    '/v1/account/webhooks/{id}': { delete: { tags: ['Accounts'], security: [{ session: [] }], summary: 'Remove a webhook', parameters: [{ name: 'id', in: 'path', required: true, schema: S }], responses: ok('ok') } },
+    '/v1/account/transactions': { get: { tags: ['Accounts'], security: [{ session: [] }], summary: 'Unified activity feed', responses: ok('transactions') } },
+    '/v1/account/statement': { get: { tags: ['Accounts'], security: [{ session: [] }], summary: 'Treasury statement snapshot', responses: ok('statement') } },
   },
 } as const;

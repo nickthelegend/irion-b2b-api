@@ -12,6 +12,7 @@ import { WalletService } from './wallet.js';
 import * as accounts from './accounts.js';
 import * as passkeys from './passkeys.js';
 import * as session from './session.js';
+import * as nbstore from './neobank-store.js';
 import { resolve } from 'node:path';
 
 try { process.loadEnvFile?.(resolve(import.meta.dirname, '../.env')); } catch { try { process.loadEnvFile?.('.env'); } catch { /* no .env */ } }
@@ -70,7 +71,20 @@ function requireSession(req: Request, res: Response, next: NextFunction) {
   next();
 }
 const acct = (req: Request) => (req as any).account as accounts.Account;
-const emitAccount = (a: accounts.Account, type: string, data: unknown) => { store.addEvent(a.id, type, data); };
+const emitAccount = (a: accounts.Account, type: string, data: unknown) => { store.addEvent(a.id, type, data); nbstore.deliverWebhooks(a.id, type, data); };
+
+/** execute a scheduled payment (standing order or recurring payroll) on-ledger. */
+async function runSchedule(a: accounts.Account, s: nbstore.Scheduled): Promise<Record<string, unknown>> {
+  if (s.type === 'transfer') {
+    const to = String(s.payload?.to ?? ''); const amount = Number(s.payload?.amount ?? 0); const currency = String(s.payload?.currency ?? 'USDC').toUpperCase();
+    if (!to || !(amount > 0)) throw new LedgerError('schedule payload needs { to, amount }', '');
+    return { type: 'transfer', to, amount, currency, updateId: await led.settleCurrency(a.party, to, amount, currency) };
+  }
+  const entries: any[] = Array.isArray(s.payload?.entries) ? s.payload.entries : [];
+  const resolved = entries.map((e) => { const emp = store.getEmployee(a.id, String(e.employeeId)); if (!emp) throw new LedgerError(`unknown employee ${e.employeeId}`, ''); return { party: emp.party, amount: Number(e.amount ?? emp.salary ?? 0), currency: (emp.currency ?? 'USDC').toUpperCase() }; }).filter((r) => r.amount > 0);
+  const paid = await led.payrollRun(a.party, resolved);
+  return { type: 'payroll', count: paid.length, total: paid.reduce((n, p) => n + p.amount, 0) };
+}
 
 app.post('/v1/auth/register/begin', wrap(async (req, res) => {
   const name = String(req.body?.name ?? '').trim();
@@ -243,6 +257,168 @@ app.post('/v1/account/loans/:id/repay', requireSession, wrap(async (req, res) =>
   res.json({ ok: true, loanId: req.params.id, repaid: amount });
 }));
 app.get('/v1/account/events', requireSession, wrap(async (req, res) => res.json({ events: store.listEvents(acct(req).id) })));
+
+// ---- payees (saved beneficiaries) ----
+app.get('/v1/account/payees', requireSession, wrap(async (req, res) => res.json({ payees: nbstore.listPayees(acct(req).id) })));
+app.post('/v1/account/payees', requireSession, wrap(async (req, res) => {
+  const name = String(req.body?.name ?? '').trim();
+  const party = String(req.body?.party ?? '').trim();
+  const currency = String(req.body?.currency ?? 'USDC').toUpperCase();
+  if (!name || !party) throw new LedgerError('payee name and party are required', '');
+  res.status(201).json({ payee: nbstore.addPayee({ accountId: acct(req).id, name, party, currency }) });
+}));
+app.delete('/v1/account/payees/:id', requireSession, wrap(async (req, res) => {
+  if (!nbstore.removePayee(acct(req).id, req.params.id)) throw new LedgerError('payee not found', '');
+  res.json({ ok: true });
+}));
+
+// ---- FX quote (preview a conversion before rebalancing) ----
+app.get('/v1/account/fx/quote', requireSession, wrap(async (req, res) => {
+  const from = String(req.query.from ?? '').toUpperCase();
+  const to = String(req.query.to ?? '').toUpperCase();
+  const amount = Number(req.query.amount ?? 0);
+  const rate = FX_RATES[`${from}:${to}`];
+  if (!rate) throw new LedgerError(`no FX rate for ${from}->${to}`, '');
+  res.json({ from, to, amount, rate, receive: +(amount * rate).toFixed(2), source: 'operator-quoted' });
+}));
+
+// ---- sub-accounts / pots (each is its own platform-custodied Canton party) ----
+app.get('/v1/account/sub-accounts', requireSession, wrap(async (req, res) => {
+  const subs = nbstore.listSubs(acct(req).id);
+  res.json({ subAccounts: await Promise.all(subs.map(async (s) => ({ ...s, balance: await led.usdcBalance(s.party) }))) });
+}));
+app.post('/v1/account/sub-accounts', requireSession, wrap(async (req, res) => {
+  const name = String(req.body?.name ?? '').trim();
+  if (!name) throw new LedgerError('sub-account name required', '');
+  const party = await led.allocateParty('sub' + acct(req).id.slice(-6));
+  const sub = nbstore.addSub({ accountId: acct(req).id, name, party });
+  emitAccount(acct(req), 'subaccount.created', { id: sub.id, name });
+  res.status(201).json({ subAccount: { ...sub, balance: 0 } });
+}));
+app.post('/v1/account/sub-accounts/:id/move', requireSession, wrap(async (req, res) => {
+  const a = acct(req);
+  const sub = nbstore.getSub(a.id, req.params.id);
+  if (!sub) throw new LedgerError('sub-account not found', '');
+  const amount = num(req.body?.amount, 'amount');
+  const currency = String(req.body?.currency ?? 'USDC').toUpperCase();
+  const dir = String(req.body?.direction ?? 'in'); // 'in' = main→pot, 'out' = pot→main
+  const [from, to] = dir === 'out' ? [sub.party, a.party] : [a.party, sub.party];
+  const updateId = await led.settleCurrency(from, to, amount, currency);
+  emitAccount(a, 'subaccount.moved', { id: sub.id, amount, currency, direction: dir, updateId });
+  res.json({ ok: true, direction: dir, amount, currency, updateId });
+}));
+
+// ---- invoices / payment requests ----
+app.get('/v1/account/invoices', requireSession, wrap(async (req, res) => res.json({ invoices: nbstore.listInvoices(acct(req).id) })));
+app.post('/v1/account/invoices', requireSession, wrap(async (req, res) => {
+  const amount = num(req.body?.amount, 'amount');
+  const currency = String(req.body?.currency ?? 'USDC').toUpperCase();
+  const counterparty = String(req.body?.counterparty ?? '').trim();
+  const description = String(req.body?.description ?? '').trim();
+  const inv = nbstore.addInvoice({ accountId: acct(req).id, amount, currency, counterparty, description });
+  emitAccount(acct(req), 'invoice.created', { id: inv.id, number: inv.number, amount, currency });
+  res.status(201).json({ invoice: inv });
+}));
+app.post('/v1/account/invoices/:id/pay', requireSession, wrap(async (req, res) => {
+  const a = acct(req);
+  const inv = nbstore.getInvoice(a.id, req.params.id);
+  if (!inv) throw new LedgerError('invoice not found', '');
+  if (inv.status === 'paid') throw new LedgerError('invoice already paid', '');
+  // a payer party settles to the business; if `from` is given it transfers, else
+  // the amount is funded (demo on-ramp = the payer paid in off-platform).
+  const from = String(req.body?.from ?? '').trim();
+  let txHash: string;
+  if (from) txHash = await led.settleCurrency(from, a.party, inv.amount, inv.currency);
+  else { await led.fund(a.party, inv.amount, inv.currency); txHash = 'funded'; }
+  const paid = nbstore.markInvoicePaid(a.id, inv.id, txHash);
+  emitAccount(a, 'invoice.paid', { id: inv.id, number: inv.number, amount: inv.amount, txHash });
+  res.json({ ok: true, invoice: paid });
+}));
+
+// ---- scheduled payments (standing orders + recurring payroll) ----
+app.get('/v1/account/scheduled', requireSession, wrap(async (req, res) => res.json({ scheduled: nbstore.listScheduled(acct(req).id) })));
+app.post('/v1/account/scheduled', requireSession, wrap(async (req, res) => {
+  const type = String(req.body?.type ?? 'transfer');
+  if (type !== 'transfer' && type !== 'payroll') throw new LedgerError("type must be 'transfer' or 'payroll'", '');
+  const label = String(req.body?.label ?? type).trim();
+  const intervalDays = num(req.body?.intervalDays ?? 30, 'intervalDays');
+  const startInDays = Number(req.body?.startInDays ?? 0);
+  const nextRun = new Date(Date.now() + startInDays * 86400_000).toISOString();
+  res.status(201).json({ scheduled: nbstore.addScheduled({ accountId: acct(req).id, type, label, intervalDays, nextRun, payload: req.body?.payload ?? {} }) });
+}));
+app.post('/v1/account/scheduled/run-due', requireSession, wrap(async (req, res) => {
+  const a = acct(req);
+  const now = new Date().toISOString();
+  const due = nbstore.listScheduled(a.id).filter((s) => s.status === 'active' && s.nextRun <= now);
+  const ran: any[] = [];
+  for (const s of due) {
+    try { const r = await runSchedule(a, s); nbstore.advanceScheduled(s.id); emitAccount(a, 'scheduled.run', { id: s.id, ...r }); ran.push({ id: s.id, ...r }); }
+    catch (e: any) { ran.push({ id: s.id, error: e?.message || 'failed' }); }
+  }
+  res.json({ ranCount: ran.length, ran });
+}));
+app.post('/v1/account/scheduled/:id/run', requireSession, wrap(async (req, res) => {
+  const a = acct(req);
+  const s = nbstore.getScheduled(a.id, req.params.id);
+  if (!s) throw new LedgerError('schedule not found', '');
+  const r = await runSchedule(a, s);
+  nbstore.advanceScheduled(s.id);
+  emitAccount(a, 'scheduled.run', { id: s.id, ...r });
+  res.json({ ok: true, ...r });
+}));
+app.post('/v1/account/scheduled/:id/pause', requireSession, wrap(async (req, res) => {
+  if (!nbstore.setScheduledStatus(acct(req).id, req.params.id, 'paused')) throw new LedgerError('schedule not found', '');
+  res.json({ ok: true });
+}));
+app.post('/v1/account/scheduled/:id/resume', requireSession, wrap(async (req, res) => {
+  if (!nbstore.setScheduledStatus(acct(req).id, req.params.id, 'active')) throw new LedgerError('schedule not found', '');
+  res.json({ ok: true });
+}));
+
+// ---- virtual cards (modeled; card-network issuance is a real-world integration) ----
+app.get('/v1/account/cards', requireSession, wrap(async (req, res) => res.json({ cards: nbstore.listCards(acct(req).id) })));
+app.post('/v1/account/cards', requireSession, wrap(async (req, res) => {
+  const label = String(req.body?.label ?? 'Virtual card').trim();
+  const currency = String(req.body?.currency ?? 'USDC').toUpperCase();
+  const spendLimit = req.body?.spendLimit != null ? num(req.body.spendLimit, 'spendLimit') : undefined;
+  const subAccountId = req.body?.subAccountId ? String(req.body.subAccountId) : undefined;
+  const card = nbstore.addCard({ accountId: acct(req).id, label, currency, spendLimit, subAccountId });
+  emitAccount(acct(req), 'card.issued', { id: card.id, last4: card.last4, label });
+  res.status(201).json({ card });
+}));
+app.post('/v1/account/cards/:id/freeze', requireSession, wrap(async (req, res) => {
+  const c = nbstore.setCardStatus(acct(req).id, req.params.id, 'frozen'); if (!c) throw new LedgerError('card not found', ''); res.json({ card: c });
+}));
+app.post('/v1/account/cards/:id/unfreeze', requireSession, wrap(async (req, res) => {
+  const c = nbstore.setCardStatus(acct(req).id, req.params.id, 'active'); if (!c) throw new LedgerError('card not found', ''); res.json({ card: c });
+}));
+
+// ---- account-scoped webhooks ----
+app.get('/v1/account/webhooks', requireSession, wrap(async (req, res) => res.json({ webhooks: nbstore.listWebhooks(acct(req).id) })));
+app.post('/v1/account/webhooks', requireSession, wrap(async (req, res) => {
+  const url = String(req.body?.url ?? '').trim();
+  if (!/^https?:\/\//.test(url)) throw new LedgerError('a valid webhook url is required', '');
+  const events = Array.isArray(req.body?.events) ? req.body.events.map(String) : ['*'];
+  res.status(201).json({ webhook: nbstore.addWebhook({ accountId: acct(req).id, url, events }) });
+}));
+app.delete('/v1/account/webhooks/:id', requireSession, wrap(async (req, res) => {
+  if (!nbstore.removeWebhook(acct(req).id, req.params.id)) throw new LedgerError('webhook not found', ''); res.json({ ok: true });
+}));
+
+// ---- unified transactions + statement ----
+app.get('/v1/account/transactions', requireSession, wrap(async (req, res) =>
+  res.json({ transactions: store.listEvents(acct(req).id).map((e) => ({ id: e.id, type: e.type, at: e.createdAt, data: e.data })) })));
+app.get('/v1/account/statement', requireSession, wrap(async (req, res) => {
+  const a = acct(req);
+  const t = await led.treasuryMulti(a.party);
+  const evs = store.listEvents(a.id);
+  const n = (type: string) => evs.filter((e) => e.type === type).length;
+  res.json({
+    party: a.party, balances: t.balances, cash: t.cash, yieldValue: t.yieldValue, total: t.total,
+    activity: { transfers: n('transfer.sent'), rebalances: n('treasury.rebalanced'), payrollRuns: n('payroll.run'), loansDrawn: n('loan.drawn'), invoicesPaid: n('invoice.paid'), scheduledRuns: n('scheduled.run') },
+    totalEvents: evs.length,
+  });
+}));
 
 // ---- public ----
 app.get('/', (_req, res) => res.sendFile(resolve(process.cwd(), 'public/home.html')));
