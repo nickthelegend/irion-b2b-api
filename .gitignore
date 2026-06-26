@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.*
+.irion-state.json
+.irion-businesses.json
+.irion-settlements.json
+.irion-paymentlinks.json
+.irion-webhooks.json
+.irion-events.json
+.irion-wallets.json
+*.log

@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Irion · Programmable credit &amp; treasury on Canton</title>
+<style>
+  :root{--ink:#e8eaf2;--mut:#9aa3b8;--bg:#0a0c16;--card:#121627;--line:#222842;--ac:#7c8bff;--g1:#6366f1;--g2:#22d3ee}
+  *{box-sizing:border-box}
+  body{margin:0;background:radial-gradient(1200px 600px at 70% -10%,rgba(99,102,241,.22),transparent),var(--bg);color:var(--ink);font:15px/1.6 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto}
+  .wrap{max-width:1040px;margin:0 auto;padding:26px 22px 70px}
+  header{display:flex;align-items:center;gap:12px}
+  .logo{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--g1),var(--g2));display:grid;place-items:center;color:#fff;font-weight:800;font-size:18px}
+  header b{font-size:18px}
+  .net{margin-left:auto;font-size:12px;color:var(--mut);border:1px solid var(--line);padding:6px 12px;border-radius:999px}
+  .hero{margin:54px 0 14px}
+  .hero h1{font-size:46px;line-height:1.08;letter-spacing:-.02em;margin:0 0 16px;max-width:760px}
+  .hero h1 .grad{background:linear-gradient(120deg,#a5b4fc,#5eead4);-webkit-background-clip:text;background-clip:text;color:transparent}
+  .hero p{color:var(--mut);font-size:18px;max-width:640px}
+  .chips{display:flex;gap:10px;flex-wrap:wrap;margin:22px 0 8px}
+  .chip{border:1px solid var(--line);background:#0e1322;border-radius:999px;padding:7px 14px;font-size:13px;color:#c7cdde}
+  .grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:34px}
+  a.card{display:block;text-decoration:none;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:16px;padding:22px;transition:.18s}
+  a.card:hover{transform:translateY(-2px);border-color:#3b4470;box-shadow:0 20px 50px -30px rgba(99,102,241,.5)}
+  a.card .ic{width:42px;height:42px;border-radius:12px;background:#1a2138;display:grid;place-items:center;font-size:21px;margin-bottom:14px}
+  a.card h3{margin:0 0 5px;font-size:18px;display:flex;align-items:center;gap:8px}
+  a.card p{margin:0;color:var(--mut);font-size:14px}
+  a.card .go{color:var(--ac);font-size:13px;font-weight:600;margin-top:12px;display:inline-block}
+  .prim{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:34px}
+  .prim div{border:1px solid var(--line);border-radius:13px;padding:15px;background:#0e1322}
+  .prim b{display:block;font-size:14px}.prim span{color:var(--mut);font-size:12px}
+  footer{margin-top:46px;color:var(--mut);font-size:13px;border-top:1px solid var(--line);padding-top:18px}
+  .tag{font-size:11px;color:#34d399;border:1px solid #14492f;background:#0c2418;border-radius:999px;padding:2px 9px;margin-left:6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header><div class="logo">✦</div><b>Irion</b><span class="net">● Canton · Testnet</span></header>
+
+  <section class="hero">
+    <h1>Programmable <span class="grad">credit &amp; treasury</span> infrastructure, on Canton.</h1>
+    <p>Stripe Treasury + Modern Treasury + Embedded Credit — one API for treasury, credit, working capital, global settlement, and embedded products. Private by construction.</p>
+    <div class="chips"><span class="chip">🔒 Privacy by construction</span><span class="chip">⚡ Atomic settlement</span><span class="chip">🧩 One integration</span><span class="chip">🪙 USDC on Canton</span></div>
+  </section>
+
+  <div class="prim">
+    <div><b>Treasury</b><span>Idle cash earns yield</span></div>
+    <div><b>Credit</b><span>Privacy-native lines</span></div>
+    <div><b>Lending</b><span>Working capital on tap</span></div>
+    <div><b>Settlement</b><span>Instant &amp; atomic</span></div>
+  </div>
+
+  <div class="grid">
+    <a class="card" href="/merchant"><div class="ic">🏪</div><h3>Merchant Dashboard</h3><p>Accept USDC with payment links — customers Pay Directly, via BNPL, or Split Pay. Treasury + yield built in.</p><span class="go">Open dashboard →</span></a>
+    <a class="card" href="/app"><div class="ic">📱</div><h3>Consumer App <span class="tag">BNPL</span></h3><p>Earn yield on idle cash, prove your credit privately, borrow, and manage loans — all on Canton.</p><span class="go">Open app →</span></a>
+    <a class="card" href="/dashboard"><div class="ic">🏦</div><h3>Neobank Demo</h3><p>A reference neobank built on the B2B API: treasury, credit, working capital, settlement, embedded BNPL.</p><span class="go">Open demo →</span></a>
+    <a class="card" href="/openapi.json"><div class="ic">⚙️</div><h3>Developer API</h3><p>The Irion B2B API: treasury, credit, lending, settlement, payment links, webhooks, idempotency. OpenAPI spec.</p><span class="go">View OpenAPI →</span></a>
+  </div>
+
+  <footer>Live on Canton testnet · not audited, not for real funds. Every balance, credit line, and loan settles on a real Canton ledger.</footer>
+</div>
+</body>
+</html>
