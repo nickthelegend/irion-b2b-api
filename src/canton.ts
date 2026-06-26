@@ -149,6 +149,17 @@ export class Ledger {
     return (await this.tokensOf(party, this.currencyIssuer(currency))).reduce((s, t) => s + t.amount, 0);
   }
 
+  /** DIRECT checkout on-ramp: mint exactly `amount` USDC to the shopper and return
+   * that token's cid, so the shopper can sign ONE Token_Transfer of it to the
+   * merchant — a REAL self-custody debit (no operator mint-to-merchant). The mint
+   * is the demo on-ramp; the transfer the shopper signs is the real settlement. */
+  async directPrepare(party: Party, amount: number): Promise<ContractId> {
+    await this.fund(party, amount, 'USDC');
+    const [tok] = await this.queryActive(party, 'Token', (a) => a.owner === party && a.issuer === this.cfg.usdcIssuer && Math.abs(Number(a.amount) - amount) < 1e-9);
+    if (!tok) throw new LedgerError('direct prepare: funded token not found', '');
+    return tok.contractId;
+  }
+
   // ------------------------------------------------------------- protocol bootstrap
 
   async initConfig(): Promise<ContractId> {

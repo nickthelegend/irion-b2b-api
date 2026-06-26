@@ -117,9 +117,22 @@ export const addPayrollRun = (r: Omit<PayrollRun, 'id' | 'createdAt'>): PayrollR
   all.push(run); writeJson(PAYROLL, all); return run;
 };
 
+// ---- idempotency (PERSISTENT — survives restart; capped at 500 keys) ----
+const IDEM = file('.irion-idem.json');
+export const getIdem = (k: string): { status: number; body: unknown } | undefined =>
+  readJson<Record<string, { status: number; body: unknown }>>(IDEM, {})[k];
+export const setIdem = (k: string, v: { status: number; body: unknown }) => {
+  const all = readJson<Record<string, { status: number; body: unknown }>>(IDEM, {});
+  all[k] = v;
+  const keys = Object.keys(all);
+  if (keys.length > 500) delete all[keys[0]];
+  writeJson(IDEM, all);
+};
+
 /** wipe API metadata (used by `bootstrap --force` for a clean demo). Currency
  * issuers persist (they're ledger parties). */
 export const clearData = () => {
   for (const f of [BIZ, SETTLE, LINKS, EVENTS, EMP, PAYROLL]) if (existsSync(f)) writeJson(f, []);
   if (existsSync(HOOKS)) writeJson(HOOKS, {});
+  if (existsSync(IDEM)) writeJson(IDEM, {});
 };

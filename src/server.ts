@@ -43,11 +43,10 @@ const num = (v: unknown, name: string): number => {
 };
 
 // idempotency: replay the first response for a repeated Idempotency-Key (POST only)
-const idem = new Map<string, { status: number; body: unknown }>();
 app.use((req, res, next) => {
   const k = req.method === 'POST' ? (req.headers['idempotency-key'] as string) : '';
-  if (k && idem.has(k)) { const c = idem.get(k)!; return res.status(c.status).json(c.body); }
-  if (k) { const orig = res.json.bind(res); (res as any).json = (b: unknown) => { idem.set(k, { status: res.statusCode, body: b }); return orig(b as any); }; }
+  if (k) { const c = store.getIdem(k); if (c) return res.status(c.status).json(c.body as any); }
+  if (k) { const orig = res.json.bind(res); (res as any).json = (b: unknown) => { store.setIdem(k, { status: res.statusCode, body: b }); return orig(b as any); }; }
   next();
 });
 
@@ -300,11 +299,22 @@ app.post('/v1/wallet/bnpl/complete', wrap(async (req, res) => {
   res.json({ status: 'disbursed', borrower: party, loanId: loan.loanId, amount: loan.amount });
 }));
 
+// public: DIRECT checkout step 1 — mint the shopper `amount` (demo on-ramp) and
+// return the token cid they then sign a Token_Transfer of, straight to the
+// merchant. The transfer is a REAL self-custody debit (no operator mint-to-merchant).
+app.post('/v1/wallet/direct/prepare', wrap(async (req, res) => {
+  const party = String(req.body?.party ?? '').trim();
+  const amount = num(req.body?.amount, 'amount');
+  if (!party) throw new LedgerError("'party' required", '');
+  res.json({ tokenCid: await led.directPrepare(party, amount), amount });
+}));
+
 // public: settle a storefront checkout the customer authorized in their wallet.
 //   mode 'credit' | 'bnpl' → the customer already signed an UnsecuredRequest;
 //     operator ensures credit + accepts it (customer owes a PRIVATE loan), and
-//     the MERCHANT is paid `amount` on-ledger.
-//   mode 'direct' → pay-in-full; the MERCHANT is paid `amount` on-ledger.
+//     the pool fronts the MERCHANT `amount` on-ledger.
+//   mode 'direct' → the shopper already signed a Token_Transfer of `amount` to the
+//     merchant (REAL on-ledger debit); the client passes the resulting txHash.
 // Optionally marks the merchant bill paid (billHash + MERCHANT_APP_URL).
 app.post('/v1/wallet/checkout', wrap(async (req, res) => {
   const party = String(req.body?.party ?? '').trim();
@@ -316,21 +326,29 @@ app.post('/v1/wallet/checkout', wrap(async (req, res) => {
   if (!(amount > 0)) throw new LedgerError("'amount' must be a positive number", '');
 
   let loanId: string | null = null;
-  if (mode === 'bnpl' || mode === 'credit') {
+  let merchantPaid = false;
+  let txHash: string;
+
+  if (mode === 'direct') {
+    // The shopper already signed a Token_Transfer of `amount` to the merchant in
+    // their own wallet (real debit) — trust + record the on-ledger updateId.
+    txHash = String(req.body?.txHash ?? '').trim();
+    if (!txHash) throw new LedgerError('direct checkout: missing signed-transfer txHash', '');
+    merchantPaid = true; // the shopper paid the merchant directly, on-ledger
+  } else {
+    // credit | bnpl: the borrower signed an UnsecuredRequest; the operator accepts
+    // it (a PRIVATE loan the borrower owes) and the pool fronts the merchant.
     await led.ensureCredit(party, Math.max(1000, amount), 780);
     const loan = await led.acceptUnsecuredFor(party);
     loanId = loan.loanId;
+    txHash = loanId;
+    // Best-effort merchant payout (a placeholder/un-onboarded merchant party must
+    // not fail the customer's checkout).
+    if (merchant) {
+      try { await led.fund(merchant, amount); merchantPaid = true; }
+      catch (e) { console.log(`merchant payout skipped (${merchant.slice(0, 20)}…): ${String((e as any)?.message || e).slice(0, 80)}`); }
+    }
   }
-  // Pay the merchant on-ledger (the pool/customer settles `amount` to the merchant
-  // party). Best-effort: a seeded/demo merchant whose party isn't onboarded on the
-  // ledger (UNKNOWN_INFORMEES) shouldn't fail the customer's checkout.
-  let merchantPaid = false;
-  if (merchant) {
-    try { await led.fund(merchant, amount); merchantPaid = true; }
-    catch (e) { console.log(`merchant payout skipped (${merchant.slice(0, 20)}…): ${String((e as any)?.message || e).slice(0, 80)}`); }
-  }
-
-  const txHash = loanId ?? `direct-${Date.now().toString(36)}`;
   // Best-effort: mark the merchant bill paid so it shows in the dashboard.
   if (billHash) {
     const base = process.env.MERCHANT_APP_URL ?? 'http://localhost:3004';
