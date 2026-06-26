@@ -9,6 +9,9 @@ import { Ledger, LedgerError } from './canton.js';
 import * as store from './store.js';
 import { openapi } from './openapi.js';
 import { WalletService } from './wallet.js';
+import * as accounts from './accounts.js';
+import * as passkeys from './passkeys.js';
+import * as session from './session.js';
 import { resolve } from 'node:path';
 
 try { process.loadEnvFile?.(resolve(import.meta.dirname, '../.env')); } catch { try { process.loadEnvFile?.('.env'); } catch { /* no .env */ } }
@@ -54,6 +57,193 @@ function emit(businessId: string, type: string, data: unknown) {
   const url = store.getWebhook(businessId);
   if (url) fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ type, data, createdAt: new Date().toISOString() }) }).catch(() => {});
 }
+
+// ---- Passkey auth + B2B accounts ----
+// Registered BEFORE the `/v1` apiKey gate below, so /v1/auth/* are public. The
+// passkey-authenticated session REPLACES the spoofable x-wallet-address header.
+function requireSession(req: Request, res: Response, next: NextFunction) {
+  const tok = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '');
+  const claims = session.verify(tok);
+  if (!claims || claims.scope !== 'session') return res.status(401).json({ error: 'unauthorized — sign in with your passkey' });
+  const account = accounts.getAccount(claims.sub);
+  if (!account) return res.status(401).json({ error: 'account not found' });
+  (req as any).account = account;
+  next();
+}
+const acct = (req: Request) => (req as any).account as accounts.Account;
+const emitAccount = (a: accounts.Account, type: string, data: unknown) => { store.addEvent(a.id, type, data); };
+
+app.post('/v1/auth/register/begin', wrap(async (req, res) => {
+  const name = String(req.body?.name ?? '').trim();
+  const email = String(req.body?.email ?? '').trim().toLowerCase();
+  if (!name || !email) throw new LedgerError('name and email are required', '');
+  if (accounts.getAccountByEmail(email)) throw new LedgerError('an account with that email already exists — sign in instead', '');
+  const options = await passkeys.regOptions({ userId: 'pending:' + email, userName: email, displayName: name });
+  res.json({ options, regToken: session.issue({ scope: 'register', sub: 'pending:' + email, name, email, challenge: options.challenge }, 300) });
+}));
+
+app.post('/v1/auth/register/finish', wrap(async (req, res) => {
+  const { regToken, response } = req.body ?? {};
+  const claims = session.verify(regToken);
+  if (!claims || claims.scope !== 'register') throw new LedgerError('invalid or expired registration token', '');
+  const cred = await passkeys.verifyReg(response, String(claims.challenge));
+  if (!cred) throw new LedgerError('passkey registration could not be verified', '');
+  // Platform-custodied party: operator-allocated, so the platform's ledger authority
+  // IS the custody and the passkey gates access (enables unattended automation).
+  const party = await led.allocateParty(String(claims.email));
+  const account = accounts.createAccount({ name: String(claims.name), email: String(claims.email), party, fingerprint: '', publicKey: '' });
+  accounts.addPasskey(account.id, cred);
+  await led.openProfile(party).catch(() => {});         // open a credit profile for the new business
+  res.status(201).json({ session: session.issue({ scope: 'session', sub: account.id }, 3600), account: accounts.publicView(account) });
+}));
+
+app.post('/v1/auth/login/begin', wrap(async (req, res) => {
+  const email = String(req.body?.email ?? '').trim().toLowerCase();
+  const account = accounts.getAccountByEmail(email);
+  if (!account) throw new LedgerError('no account with that email', '');
+  const options = await passkeys.authOptions(account.passkeys);
+  res.json({ options, loginToken: session.issue({ scope: 'login', sub: account.id, challenge: options.challenge }, 300) });
+}));
+
+app.post('/v1/auth/login/finish', wrap(async (req, res) => {
+  const { loginToken, response } = req.body ?? {};
+  const claims = session.verify(loginToken);
+  if (!claims || claims.scope !== 'login') throw new LedgerError('invalid or expired login token', '');
+  const account = accounts.getAccount(claims.sub);
+  if (!account) throw new LedgerError('account not found', '');
+  const pk = account.passkeys.find((p) => p.id === response?.id);
+  if (!pk) throw new LedgerError('unknown passkey for this account', '');
+  const newCounter = await passkeys.verifyAuth(response, String(claims.challenge), pk);
+  if (newCounter === null) throw new LedgerError('passkey authentication failed', '');
+  accounts.updatePasskeyCounter(account.id, pk.id, newCounter);
+  res.json({ session: session.issue({ scope: 'session', sub: account.id }, 3600), account: accounts.publicView(account) });
+}));
+
+app.get('/v1/auth/me', requireSession, wrap(async (req, res) => res.json({ account: accounts.publicView(acct(req)) })));
+
+// step-up: a fresh passkey assertion authorizing a high-value action (returns a short-lived approval)
+app.post('/v1/auth/stepup/begin', requireSession, wrap(async (req, res) => {
+  const a = acct(req);
+  const options = await passkeys.authOptions(a.passkeys);
+  res.json({ options, stepupToken: session.issue({ scope: 'login', sub: a.id, challenge: options.challenge, stepup: true }, 180) });
+}));
+app.post('/v1/auth/stepup/finish', requireSession, wrap(async (req, res) => {
+  const a = acct(req);
+  const { stepupToken, response } = req.body ?? {};
+  const claims = session.verify(stepupToken);
+  if (!claims || claims.sub !== a.id || claims.stepup !== true) throw new LedgerError('invalid step-up token', '');
+  const pk = a.passkeys.find((p) => p.id === response?.id);
+  if (!pk) throw new LedgerError('unknown passkey', '');
+  const c = await passkeys.verifyAuth(response, String(claims.challenge), pk);
+  if (c === null) throw new LedgerError('step-up verification failed', '');
+  accounts.updatePasskeyCounter(a.id, pk.id, c);
+  res.json({ approval: session.issue({ scope: 'stepup', sub: a.id }, 120) });
+}));
+
+// account-scoped + passkey-authenticated (the operational key is custodied + signs on the account's behalf)
+app.get('/v1/account', requireSession, wrap(async (req, res) => res.json({ account: accounts.publicView(acct(req)) })));
+app.get('/v1/account/treasury', requireSession, wrap(async (req, res) => res.json(await led.treasuryMulti(acct(req).party))));
+app.post('/v1/account/faucet', requireSession, wrap(async (req, res) => {
+  const amount = num(req.body?.amount ?? 100, 'amount');
+  const currency = String(req.body?.currency ?? 'USDC').toUpperCase();
+  await led.fund(acct(req).party, amount, currency);
+  res.json({ ok: true, funded: amount, currency, party: acct(req).party });
+}));
+
+// ---- B2B treasury: multi-currency deposit, FX rebalance, yield ----
+app.post('/v1/account/treasury/deposit', requireSession, wrap(async (req, res) => {
+  const amount = num(req.body?.amount, 'amount');
+  const currency = String(req.body?.currency ?? 'USDC').toUpperCase();
+  await led.fund(acct(req).party, amount, currency);
+  res.json({ ok: true, deposited: amount, currency, treasury: await led.treasuryMulti(acct(req).party) });
+}));
+// operator-quoted FX rates (real config values — swap a price oracle/LP in for production)
+const FX_RATES: Record<string, number> = { 'USDC:EURC': 0.92, 'EURC:USDC': 1.087, 'USDC:GBPC': 0.79, 'GBPC:USDC': 1.266, 'EURC:GBPC': 0.86, 'GBPC:EURC': 1.163 };
+app.get('/v1/account/treasury/rates', requireSession, wrap(async (_req, res) => res.json({ source: 'operator-quoted', rates: FX_RATES })));
+app.post('/v1/account/treasury/rebalance', requireSession, wrap(async (req, res) => {
+  const from = String(req.body?.from ?? '').toUpperCase();
+  const to = String(req.body?.to ?? '').toUpperCase();
+  const amount = num(req.body?.amount, 'amount');
+  const rate = FX_RATES[`${from}:${to}`];
+  if (!rate) throw new LedgerError(`no FX rate for ${from}->${to}`, '');
+  const r = await led.rebalance(acct(req).party, from, to, amount, rate);
+  emitAccount(acct(req), 'treasury.rebalanced', r);
+  res.json({ ok: true, ...r, treasury: await led.treasuryMulti(acct(req).party) });
+}));
+app.post('/v1/account/treasury/sweep', requireSession, wrap(async (req, res) => {
+  const amount = num(req.body?.amount, 'amount');
+  await led.sweepToYield(acct(req).party, amount);
+  res.json({ ok: true, swept: amount, treasury: await led.treasuryMulti(acct(req).party) });
+}));
+app.post('/v1/account/treasury/redeem', requireSession, wrap(async (req, res) => {
+  await led.redeemFromYield(acct(req).party);
+  res.json({ ok: true, treasury: await led.treasuryMulti(acct(req).party) });
+}));
+
+// ---- payments / transfers ----
+app.post('/v1/account/transfers', requireSession, wrap(async (req, res) => {
+  const to = String(req.body?.to ?? '');
+  const amount = num(req.body?.amount, 'amount');
+  const currency = String(req.body?.currency ?? 'USDC').toUpperCase();
+  if (!to) throw new LedgerError('recipient party `to` is required', '');
+  const updateId = await led.settleCurrency(acct(req).party, to, amount, currency);
+  emitAccount(acct(req), 'transfer.sent', { to, amount, currency, updateId });
+  res.json({ ok: true, to, amount, currency, updateId });
+}));
+
+// ---- employees + private payroll ----
+app.get('/v1/account/employees', requireSession, wrap(async (req, res) => res.json({ employees: store.listEmployees(acct(req).id) })));
+app.post('/v1/account/employees', requireSession, wrap(async (req, res) => {
+  const name = String(req.body?.name ?? '').trim();
+  const email = String(req.body?.email ?? '').trim();
+  const currency = String(req.body?.currency ?? 'USDC').toUpperCase();
+  const salary = req.body?.salary != null ? num(req.body.salary, 'salary') : undefined;
+  if (!name) throw new LedgerError('employee name is required', '');
+  const party = await led.allocateParty('emp' + (email || name)); // each employee is a Canton party (payee)
+  res.status(201).json({ employee: store.addEmployee({ accountId: acct(req).id, name, email, party, currency, salary }) });
+}));
+app.post('/v1/account/payroll/runs', requireSession, wrap(async (req, res) => {
+  const a = acct(req);
+  const reqEntries: any[] = Array.isArray(req.body?.entries) ? req.body.entries : [];
+  if (!reqEntries.length) throw new LedgerError('entries[] is required (each { employeeId, amount?, currency? })', '');
+  const resolved = reqEntries.map((e) => {
+    const emp = store.getEmployee(a.id, String(e.employeeId));
+    if (!emp) throw new LedgerError(`unknown employee ${e.employeeId}`, '');
+    const amount = e.amount != null ? num(e.amount, 'amount') : (emp.salary ?? 0);
+    if (amount <= 0) throw new LedgerError(`no amount or salary set for ${emp.name}`, '');
+    return { emp, amount, currency: String(e.currency ?? emp.currency ?? 'USDC').toUpperCase() };
+  });
+  const paid = await led.payrollRun(a.party, resolved.map((r) => ({ party: r.emp.party, amount: r.amount, currency: r.currency })));
+  const entries = paid.map((p, i) => ({ employeeId: resolved[i].emp.id, name: resolved[i].emp.name, party: p.party, amount: p.amount, currency: p.currency, updateId: p.updateId }));
+  const total = entries.reduce((s, e) => s + e.amount, 0);
+  const run = store.addPayrollRun({ accountId: a.id, entries, total, currency: entries[0]?.currency ?? 'USDC' });
+  emitAccount(a, 'payroll.run', { runId: run.id, total, count: entries.length });
+  res.status(201).json({ run });
+}));
+app.get('/v1/account/payroll/runs', requireSession, wrap(async (req, res) => res.json({ runs: store.listPayrollRuns(acct(req).id) })));
+
+// ---- lending / credit (REAL on-ledger underwriting) ----
+app.get('/v1/account/credit', requireSession, wrap(async (req, res) => res.json({ credit: await led.getProfile(acct(req).party) })));
+app.post('/v1/account/credit/underwrite', requireSession, wrap(async (req, res) => {
+  const r = await led.underwrite(acct(req).party);
+  emitAccount(acct(req), 'credit.underwritten', r);
+  res.json({ ok: true, ...r, credit: await led.getProfile(acct(req).party) });
+}));
+app.get('/v1/account/loans', requireSession, wrap(async (req, res) => res.json({ loans: await led.listLoans(acct(req).party) })));
+app.post('/v1/account/loans', requireSession, wrap(async (req, res) => {
+  const amount = num(req.body?.amount, 'amount');
+  const termDays = req.body?.termDays != null ? num(req.body.termDays, 'termDays') : 30;
+  const loanId = await led.drawWorkingCapital(acct(req).party, amount, termDays);
+  emitAccount(acct(req), 'loan.drawn', { loanId, amount });
+  res.status(201).json({ loanId, amount, termDays });
+}));
+app.post('/v1/account/loans/:id/repay', requireSession, wrap(async (req, res) => {
+  const amount = num(req.body?.amount, 'amount');
+  await led.repayLoan(acct(req).party, req.params.id, amount);
+  emitAccount(acct(req), 'loan.repaid', { loanId: req.params.id, amount });
+  res.json({ ok: true, loanId: req.params.id, repaid: amount });
+}));
+app.get('/v1/account/events', requireSession, wrap(async (req, res) => res.json({ events: store.listEvents(acct(req).id) })));
 
 // ---- public ----
 app.get('/', (_req, res) => res.sendFile(resolve(process.cwd(), 'public/home.html')));
@@ -391,4 +581,20 @@ app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: String(err?.message ?? err) });
 });
 
-app.listen(PORT, () => console.log(`irion-b2b-api on http://localhost:${PORT}  (ledger ${LEDGER_URL})`));
+// ensure multi-currency issuers exist (load persisted; allocate EURC/GBPC on first boot)
+async function ensureCurrencies() {
+  for (const [cur, party] of Object.entries(store.getCurrencies())) led.setCurrency(cur, party);
+  for (const cur of ['EURC', 'GBPC']) {
+    if (!led.currencies[cur]) {
+      const issuer = await led.allocateParty(cur.toLowerCase() + 'issuer');
+      store.setCurrencyIssuer(cur, issuer);
+      led.setCurrency(cur, issuer);
+      console.log(`allocated ${cur} issuer ${issuer.slice(0, 22)}…`);
+    }
+  }
+  console.log('currencies:', Object.keys(led.currencies).join(', '));
+}
+
+ensureCurrencies()
+  .catch((e) => console.error('currency init failed:', e?.message ?? e))
+  .finally(() => app.listen(PORT, () => console.log(`irion-b2b-api on http://localhost:${PORT}  (ledger ${LEDGER_URL})`)));

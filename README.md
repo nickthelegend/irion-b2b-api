@@ -96,6 +96,41 @@ curl -s localhost:8088/v1/products/bnpl -H "authorization: Bearer $KEY" -H conte
 
 Full machine-readable spec at **`GET /openapi.json`**.
 
+## B2B Console API (passkey-authenticated)
+
+The neobank/B2B console uses **passkeys** (WebAuthn — Mac Touch ID / Windows Hello / any FIDO2, synced across the user's devices) instead of API keys. The passkey is **login + step-up approval**; Irion custodies each business's operational Canton key (operator-allocated party) so **automated treasury rebalancing and scheduled payroll can sign unattended**. Pass `Authorization: Bearer <session>` (from `/v1/auth/login|register/finish`) on every `/v1/account/*` call. This also fixes the legacy spoofable-header auth.
+
+**Auth (passkeys)** — `POST /v1/auth/register/begin·finish`, `login/begin·finish`, `stepup/begin·finish`, `GET /v1/auth/me`. The `begin` calls return standard WebAuthn options for `@simplewebauthn/browser`; `finish` posts the credential back. Challenges ride in a signed token (stateless).
+
+**Treasury — multi-currency + FX**
+| Endpoint | Purpose |
+|---|---|
+| `GET /v1/account/treasury` | per-currency balances (USDC / EURC / GBPC) + yield + total |
+| `POST /v1/account/treasury/deposit` | `{amount, currency}` on-ramp |
+| `GET /v1/account/treasury/rates` | FX rates (operator-quoted) |
+| `POST /v1/account/treasury/rebalance` | `{from, to, amount}` — **real on-ledger FX swap** |
+| `POST /v1/account/treasury/sweep` · `redeem` | move idle USDC in/out of the yield pool |
+| `POST /v1/account/transfers` | `{to, amount, currency}` atomic settlement |
+
+**Private payroll**
+| Endpoint | Purpose |
+|---|---|
+| `GET·POST /v1/account/employees` | manage employees (each gets a Canton payee party) |
+| `GET·POST /v1/account/payroll/runs` | run payroll — **each salary is a separate Token transfer visible only to the employer + that employee.** No employee can see another's pay: private payroll *by construction* on Canton. |
+
+**Lending — real on-ledger underwriting**
+| Endpoint | Purpose |
+|---|---|
+| `POST /v1/account/credit/underwrite` | score + limit computed from **real on-ledger signals** (treasury depth + repayment history), then attested — not a hardcoded number |
+| `GET /v1/account/credit` | credit profile |
+| `GET·POST /v1/account/loans` · `/{id}/repay` | draw + repay working capital against the line |
+
+### Verify it end-to-end
+```bash
+npm run test:e2e      # the b2b-api + a Canton ledger must be running
+```
+Exercises every `/v1/account/*` endpoint against the **live ledger** with assertions — **20/20 green**: deposit 20k USDC · swap 5k USDC→4.6k EURC (real) + 1k→GBPC · sweep/redeem yield · pay 2 employees privately · underwrite (score 762 from treasury) · draw + repay a loan · settle a transfer.
+
 ## What's real (not a mock)
 
 Every endpoint executes real Canton JSON Ledger API submissions; the ledger is the source of truth. Verified end-to-end on a live Canton node (`dpm sandbox`):
@@ -107,3 +142,11 @@ Every endpoint executes real Canton JSON Ledger API submissions; the ledger is t
 - BNPL: customer financed 400 / 500 collateral, merchant paid up front, loan owes 420
 
 See `../irion-demo-company` for the narrated run and the dashboard.
+
+The B2B console suite (`/v1/account/*`) is verified the same way by `npm run test:e2e` (**20/20** against a live ledger): multi-currency deposit, a real USDC→EURC FX swap on-ledger, yield sweep/redeem, **private payroll** (each salary its own per-employee contract), real-signal underwriting, working-capital draw/repay, and atomic transfer.
+
+### Honest boundaries (not mocks — real-world integrations left as the production swap)
+- **On-ramp** = the issuer mints the stablecoin on-ledger (canonical on a sandbox). A real fiat rail (bank/Circle) would replace the mint with a custody deposit; the on-ledger effect is identical.
+- **FX rate** = operator-quoted config values. The swap itself is real on-ledger; production would source the rate from a price oracle / liquidity pool.
+- **Passkey ceremony** — the WebAuthn verification, options, sessions and step-up are real and tested; the actual Touch ID / Windows Hello prompt requires a browser (driven by the merchant console UI), so `test:e2e` mints the authorized session directly.
+- **Key custody** = AES-256-GCM encrypted keystore with an env master key. Production should use a KMS/HSM.

@@ -90,8 +90,36 @@ export const addEvent = (businessId: string, type: string, data: unknown): Webho
   all.push(ev); writeJson(EVENTS, all); return ev;
 };
 
-/** wipe API metadata (used by `bootstrap --force` for a clean demo). */
+// ---- currency issuers (multi-currency treasury) ----
+const CCY = file('.irion-currencies.json');
+export const getCurrencies = (): Record<string, string> => readJson<Record<string, string>>(CCY, {});
+export const setCurrencyIssuer = (cur: string, party: string) => { const all = getCurrencies(); all[cur.toUpperCase()] = party; writeJson(CCY, all); };
+
+// ---- employees (private payroll) ----
+const EMP = file('.irion-employees.json');
+export interface Employee { id: string; accountId: string; name: string; email: string; party: string; currency: string; salary?: number; createdAt: string }
+export const listEmployees = (accountId: string): Employee[] => readJson<Employee[]>(EMP, []).filter((e) => e.accountId === accountId);
+export const getEmployee = (accountId: string, id: string): Employee | undefined => readJson<Employee[]>(EMP, []).find((e) => e.id === id && e.accountId === accountId);
+export const addEmployee = (e: Omit<Employee, 'id' | 'createdAt'>): Employee => {
+  const all = readJson<Employee[]>(EMP, []);
+  const emp: Employee = { ...e, id: 'emp_' + randomBytes(6).toString('hex'), createdAt: new Date().toISOString() };
+  all.push(emp); writeJson(EMP, all); return emp;
+};
+
+// ---- payroll runs ----
+const PAYROLL = file('.irion-payroll.json');
+export interface PayrollEntry { employeeId: string; name: string; party: string; amount: number; currency: string; updateId: string }
+export interface PayrollRun { id: string; accountId: string; entries: PayrollEntry[]; total: number; currency: string; createdAt: string }
+export const listPayrollRuns = (accountId: string): PayrollRun[] => readJson<PayrollRun[]>(PAYROLL, []).filter((p) => p.accountId === accountId).reverse();
+export const addPayrollRun = (r: Omit<PayrollRun, 'id' | 'createdAt'>): PayrollRun => {
+  const all = readJson<PayrollRun[]>(PAYROLL, []);
+  const run: PayrollRun = { ...r, id: 'pay_' + randomBytes(6).toString('hex'), createdAt: new Date().toISOString() };
+  all.push(run); writeJson(PAYROLL, all); return run;
+};
+
+/** wipe API metadata (used by `bootstrap --force` for a clean demo). Currency
+ * issuers persist (they're ledger parties). */
 export const clearData = () => {
-  for (const f of [BIZ, SETTLE, LINKS, EVENTS]) if (existsSync(f)) writeJson(f, []);
+  for (const f of [BIZ, SETTLE, LINKS, EVENTS, EMP, PAYROLL]) if (existsSync(f)) writeJson(f, []);
   if (existsSync(HOOKS)) writeJson(HOOKS, {});
 };

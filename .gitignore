@@ -1,11 +1,7 @@
 node_modules/
 .env
-.env.*
-.irion-state.json
-.irion-businesses.json
-.irion-settlements.json
-.irion-paymentlinks.json
-.irion-webhooks.json
-.irion-events.json
-.irion-wallets.json
+.env.local
+!.env.example
+# all runtime ledger state + secrets (incl. the encrypted keystore + account/currency/payroll stores)
+.irion-*.json
 *.log
