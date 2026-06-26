@@ -29,3 +29,9 @@ const txSig = naclUtil.encodeBase64(nacl.sign.detached(naclUtil.decodeBase64(pt.
 const ex: any = await post('/rpc', { id: 2, jsonrpc: '2.0', method: 'executePrepared', params: { ...pt.result, partyId: done.partyId, signatureBase64: txSig } });
 console.log('executePrepared →', ex.error ? `❌ ${JSON.stringify(ex.error).slice(0, 200)}` : `✅ ${JSON.stringify(ex.result).slice(0, 100)}`);
 console.log(ex.error ? '' : '🎉 FULL FLOW WORKS: onboard → prepare → sign → execute landed a real tx on the ledger');
+
+// Consumer endpoints against the real onboarded party.
+const fres: any = await fetch('http://localhost:8088/v1/wallet/faucet', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ party: done.partyId, amount: 100 }) }).then((r) => r.json());
+console.log('faucet →', fres.error ? `❌ ${JSON.stringify(fres.error).slice(0, 120)}` : `✅ balance ${fres.balance} USDC`);
+const pos: any = await fetch('http://localhost:8088/v1/wallet/positions?party=' + encodeURIComponent(done.partyId)).then((r) => r.json());
+console.log('positions →', `balance ${pos.balance} · loans ${(pos.loans || []).length} · credit ${pos.credit ? pos.credit.creditLimit : 'none'}`);

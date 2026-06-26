@@ -9,7 +9,6 @@ import { Ledger, LedgerError } from './canton.js';
 import * as store from './store.js';
 import { openapi } from './openapi.js';
 import { WalletService } from './wallet.js';
-import { PrivyWalletService } from './privy.js';
 import { resolve } from 'node:path';
 
 try { process.loadEnvFile?.(resolve(import.meta.dirname, '../.env')); } catch { try { process.loadEnvFile?.('.env'); } catch { /* no .env */ } }
@@ -18,10 +17,7 @@ const led = new Ledger(store.cantonConfig(state));
 const LEDGER_URL = process.env.CANTON_JSON_API ?? 'http://localhost:6864';
 const PORT = Number(process.env.PORT ?? 8088);
 const wallets = new WalletService(LEDGER_URL, process.env.IRION_PACKAGE ?? 'irion-model');
-const privyWallets = (process.env.PRIVY_APP_ID && process.env.PRIVY_APP_SECRET)
-  ? new PrivyWalletService(LEDGER_URL, process.env.PRIVY_APP_ID, process.env.PRIVY_APP_SECRET, process.env.IRION_PACKAGE ?? 'irion-model')
-  : null;
-console.log('wallet signer:', privyWallets ? 'Privy (embedded Ed25519)' : 'Canton SDK key');
+console.log('wallet signer: Canton SDK key (self-custody Ed25519)');
 
 const app = express();
 app.use(express.json());
@@ -91,7 +87,7 @@ app.get('/pay/:id', wrap(async (req, res) => {
 
 // real self-custody wallet: a genuine Canton external party + Ed25519 key
 app.post('/wallets', wrap(async (req, res) => {
-  const signer: any = privyWallets ?? wallets;
+  const signer: any = wallets;
   const w: any = await signer.create(String(req.body?.name ?? 'wallet'));
   res.status(201).json({ ...w, provider: w.provider ?? 'canton-sdk' });
 }));
@@ -162,6 +158,35 @@ app.get('/v1/wallet/treasury', wrap(async (req, res) => {
   res.json({ party, ...t });
 }));
 
+// ── consumer wallet (irion-core app): faucet · positions · repay ───────────
+// public: mint test USDC to a wallet so it can supply/repay.
+app.post('/v1/wallet/faucet', wrap(async (req, res) => {
+  const party = String(req.body?.party ?? '').trim();
+  const amount = Number(req.body?.amount ?? 100);
+  if (!party) throw new LedgerError("'party' required", '');
+  if (!(amount > 0)) throw new LedgerError("'amount' must be positive", '');
+  await led.fund(party, amount);
+  res.json({ party, minted: amount, balance: await led.usdcBalance(party) });
+}));
+
+// public: a consumer's full position — USDC balance, yield, loans, credit line.
+app.get('/v1/wallet/positions', wrap(async (req, res) => {
+  const party = String(req.query.party ?? '').trim();
+  if (!party) throw new LedgerError("'party' query param required", '');
+  const [t, loans, credit] = await Promise.all([led.treasury(party), led.listLoans(party), led.getProfile(party)]);
+  res.json({ party, balance: t.cash, yield: { shares: t.yieldShares, value: t.yieldValue }, loans, credit });
+}));
+
+// public: the cids the wallet needs to self-sign Loan_Pay (repay a loan).
+app.post('/v1/wallet/repay/context', wrap(async (req, res) => {
+  const party = String(req.body?.party ?? '').trim();
+  const loanId = String(req.body?.loanId ?? '').trim();
+  const amount = Number(req.body?.amount ?? 0);
+  if (!party || !loanId) throw new LedgerError("'party' and 'loanId' required", '');
+  if (!(amount > 0)) throw new LedgerError("'amount' must be positive", '');
+  res.json(await led.repayContext(party, loanId, amount));
+}));
+
 // public: read a payment link (for the /pay page)
 app.get('/pay-links/:id', wrap(async (req, res) => {
   const l = store.getLink(req.params.id);
@@ -182,14 +207,14 @@ app.post('/pay-links/:id/pay', wrap(async (req, res) => {
   let result: Record<string, unknown>;
   if (method === 'direct') {
     // REAL self-custody: the payer's wallet signs with its OWN Ed25519 key
-    // (Privy holds it when configured, else an SDK key). prepare → sign → execute.
-    const signer: any = privyWallets ?? wallets;
+    // (the Canton SDK self-custody key). prepare → sign → execute.
+    const signer: any = wallets;
     const w: any = await signer.create(name);
     await led.fund(w.party, A); // USDC on-ramp into the payer's own wallet
     const [tok] = await led.queryActive(w.party, 'Token', (a: any) => a.owner === w.party);
     if (!tok) throw new LedgerError('wallet funding not found', '');
     const updateId = await signer.signTokenTransfer(w.id, tok.contractId, b.party);
-    result = { method, settledOnLedger: String(updateId).slice(0, 18) + '…', payerWallet: w.party, provider: w.provider ?? 'canton-sdk', signedBy: w.privyAddress ? ('Privy wallet ' + String(w.privyAddress).slice(0, 10) + '…') : ('self-custody key ' + w.fingerprint.slice(0, 14) + '…') };
+    result = { method, settledOnLedger: String(updateId).slice(0, 18) + '…', payerWallet: w.party, provider: 'canton-sdk', signedBy: 'self-custody key ' + w.fingerprint.slice(0, 14) + '…' };
   } else if (method === 'bnpl') {
     const collateral = Math.ceil(A * 1.25);
     const payer = await led.fundedPayer(name, collateral);
@@ -215,7 +240,7 @@ app.post('/pay-links/:id/pay', wrap(async (req, res) => {
 }));
 app.get('/v1/health', wrap(async (_req, res) => {
   const v = await fetch(LEDGER_URL + '/v2/version').then((r) => r.json()).catch(() => null);
-  res.json({ status: 'ok', ledger: { url: LEDGER_URL, connected: !!v, version: v?.version ?? null }, operator: state.operator, walletSigner: privyWallets ? 'privy' : 'canton-sdk' });
+  res.json({ status: 'ok', ledger: { url: LEDGER_URL, connected: !!v, version: v?.version ?? null }, operator: state.operator, walletSigner: 'canton-sdk' });
 }));
 
 // onboard a business (neobank tenant) — returns an API key + its Canton party

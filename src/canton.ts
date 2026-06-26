@@ -267,6 +267,19 @@ export class Ledger {
     return { loanId: this.madeLive(tx, 'Loan').contractId, amount };
   }
 
+  /** The cids a wallet needs to self-sign `Loan_Pay` (repay): the loan, a USDC
+   * token the borrower owns covering `amount` (Loan_Pay splits it internally), and
+   * the pool/profile/config. */
+  async repayContext(borrower: Party, loanCid: ContractId, amount: number) {
+    const pool = await this.getPool();
+    const [profile] = await this.queryActive(this.cfg.operator, 'CreditProfile', (a) => a.borrower === borrower);
+    if (!profile) throw new Error('no credit profile');
+    const configCid = await this.configCid();
+    const toks = (await this.tokensOf(borrower)).filter((t) => t.amount >= amount).sort((a, b) => a.amount - b.amount);
+    if (!toks.length) throw new Error('insufficient USDC to repay — use the faucet first');
+    return { loanCid, payTokenCid: toks[0].contractId, poolCid: pool.contractId, profileCid: profile.contractId, configCid };
+  }
+
   async listLoans(business: Party) {
     const ls = await this.queryActive(this.cfg.operator, 'Loan', (a) => a.borrower === business);
     return ls.map((l) => {

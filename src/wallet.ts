@@ -3,9 +3,8 @@
 // Each wallet is a genuine EXTERNAL party: the user holds an Ed25519 key, and
 // transactions are signed by that key via prepare → sign → execute. The
 // operator/validator never holds the signing key. This is the embedded-wallet
-// model (the provider holds the key on the user's behalf after auth — the
-// Canton-native equivalent of a Privy embedded wallet); the same flow runs in
-// the browser for true self-custody (the SDK is isomorphic).
+// model (the provider holds the key on the user's behalf after auth); the same
+// flow runs in the browser for true self-custody (the SDK is isomorphic).
 import { SDK } from '@canton-network/wallet-sdk';
 import { randomBytes } from 'node:crypto';
 
