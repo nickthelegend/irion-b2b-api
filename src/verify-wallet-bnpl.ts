@@ -17,9 +17,10 @@ await led.submit([borrower], [led.create(led.tid('Irion.Bnpl', 'UnsecuredRequest
 })]);
 console.log('✓ borrower signed an UnsecuredRequest (25 USDC)');
 
-// (2) Operator completes it (the new path behind /v1/wallet/bnpl/complete).
-await led.ensureCredit(borrower, 1000, 780);
-console.log('✓ operator opened credit profile + attested score 780 / limit 1000');
+// (2) Operator completes it (the path behind /v1/wallet/bnpl/complete) — score is
+// computed on-ledger (NOT caller-supplied) via ensureConsumerCredit.
+const cr = await led.ensureConsumerCredit(borrower);
+console.log(`✓ operator opened credit profile + attested computed score ${cr.score} / limit ${cr.limit}`);
 
 const loan = await led.acceptUnsecuredFor(borrower);
 console.log('✓ Loan disbursed:', loan);

@@ -9,6 +9,7 @@
     "resolveJsonModule": true,
     "lib": ["es2022", "dom"],
     "types": ["node"],
+    "allowImportingTsExtensions": true,
     "noEmit": true
   },
   "include": ["src"]

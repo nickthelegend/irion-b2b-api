@@ -468,9 +468,9 @@ app.get('/wallets/:id', wrap(async (req, res) => {
 app.post('/v1/wallet/bnpl/complete', wrap(async (req, res) => {
   const party = String(req.body?.party ?? '').trim();
   if (!party) throw new LedgerError("'party' (borrower partyId) required", '');
-  const score = Number(req.body?.score ?? 780);
-  const limit = Number(req.body?.limit ?? 1000);
-  await led.ensureCredit(party, limit, score);
+  // Score/limit are computed on-ledger here (treasury depth + repayment history),
+  // NOT taken from the request body — the borrower cannot set their own score.
+  await led.ensureConsumerCredit(party);
   const loan = await led.acceptUnsecuredFor(party);
   res.json({ status: 'disbursed', borrower: party, loanId: loan.loanId, amount: loan.amount });
 }));
@@ -514,7 +514,8 @@ app.post('/v1/wallet/checkout', wrap(async (req, res) => {
   } else {
     // credit | bnpl: the borrower signed an UnsecuredRequest; the operator accepts
     // it (a PRIVATE loan the borrower owes) and the pool fronts the merchant.
-    await led.ensureCredit(party, Math.max(1000, amount), 780);
+    // Score/limit computed on-ledger (not caller-supplied).
+    await led.ensureConsumerCredit(party);
     const loan = await led.acceptUnsecuredFor(party);
     loanId = loan.loanId;
     txHash = loanId;
@@ -683,12 +684,17 @@ app.post('/v1/treasury/redeem', wrap(async (req, res) => {
 app.get('/v1/credit', wrap(async (req, res) => {
   res.json((await led.getProfile(biz(req).party)) ?? { creditLimit: 0, outstanding: 0, available: 0, score: 0, repayments: 0 });
 }));
-// platform underwrites the business and issues a privacy-native credit attestation
+// platform underwrites the business and issues a privacy-native credit attestation.
+// The score is computed on-ledger (treasury depth + repayment history) via the REAL
+// underwriter — never caller-supplied. An optional `approvedLimit` may only LOWER
+// the underwritten limit (a business capping its own exposure), never raise it.
 app.post('/v1/credit/request', wrap(async (req, res) => {
-  const approvedLimit = num(req.body?.approvedLimit, 'approvedLimit');
-  const score = Number(req.body?.score ?? 720);
-  await led.attest(biz(req).party, approvedLimit, score);
-  res.json({ underwritten: true, profile: await led.getProfile(biz(req).party) });
+  const uw = await led.underwrite(biz(req).party);
+  const reqLimit = req.body?.approvedLimit != null ? Number(req.body.approvedLimit) : undefined;
+  if (reqLimit != null && reqLimit >= 0 && reqLimit < uw.limit) {
+    await led.attest(biz(req).party, reqLimit, uw.score);
+  }
+  res.json({ underwritten: true, score: uw.score, signals: uw.signals, profile: await led.getProfile(biz(req).party) });
 }));
 
 // ================= LENDING (working capital) =================

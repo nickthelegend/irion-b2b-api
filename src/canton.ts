@@ -9,6 +9,8 @@
 // Every call is a real Canton JSON Ledger API (v2) submission — the ledger is
 // the source of truth. The API server holds the operator party and mediates.
 
+import { businessScore, businessLimit, consumerScore, consumerLimit } from './underwriting.js';
+
 export interface CantonConfig {
   ledgerUrl: string;
   packageName: string;
@@ -284,6 +286,23 @@ export class Ledger {
     }
   }
 
+  /** Consumer BNPL ("pay-never") credit. The score is computed HERE from REAL
+   * on-ledger signals (treasury depth + on-time repayment history) — it is NEVER
+   * supplied by the caller, so a borrower cannot inflate their own score/limit
+   * (that was the old spoofable `req.body.score` behaviour). A new consumer is
+   * approved at the unsecured gate (config `minScoreUncollat`) as a starter line;
+   * real signals lift them above it. Idempotent — safe before each draw. */
+  async ensureConsumerCredit(borrower: Party): Promise<{ score: number; limit: number }> {
+    await this.openProfile(borrower);
+    const t = await this.treasury(borrower);
+    const prof = await this.getProfile(borrower);
+    const repayments = prof?.repayments ?? 0;
+    const score = consumerScore(t.total, repayments);   // computed — never caller-supplied
+    const limit = consumerLimit(t.total);
+    if (!prof || prof.score < score || prof.creditLimit < limit) await this.attest(borrower, limit, score);
+    return { score, limit };
+  }
+
   /** accept a borrower's ALREADY-SIGNED UnsecuredRequest (created in their own
    * wallet) → disburse a Loan. The operator is an observer on the request, so it
    * can find + accept it. Used by the wallet dApp to complete a user-signed loan. */
@@ -421,12 +440,10 @@ export class Ledger {
     const prof = await this.getProfile(business);
     const repayments = prof?.repayments ?? 0;
     const cash = t.total;
-    const depthPts = Math.min(250, Math.floor(cash / 40));    // treasury depth (≈$2k clears the 600 floor)
-    const historyPts = Math.min(120, repayments * 15);         // on-time repayment history
-    const score = Math.max(500, Math.min(850, 550 + depthPts + historyPts));
-    const limit = Math.max(50, Math.round((score / 850) * Math.max(cash * 0.5, 200)));
+    const score = businessScore(cash, repayments);
+    const limit = businessLimit(cash, score);
     await this.attest(business, limit, score);
-    return { score, limit, signals: { treasuryTotal: cash, repayments, depthPts, historyPts } };
+    return { score, limit, signals: { treasuryTotal: cash, repayments } };
   }
 }
 
