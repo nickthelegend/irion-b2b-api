@@ -569,6 +569,26 @@ app.post('/v1/wallet/supply/complete', wrap(async (req, res) => {
   const r = await led.acceptSupplyFor(party);
   res.json({ status: 'supplied', supplier: party, shares: r.shares });
 }));
+// public: consumer SUPPLY (earn yield) — the working /app path. Demo-simplified:
+// operator-mediated like the faucet (the operator escrows on the wallet's behalf),
+// but the ON-LEDGER effect is a REAL SupplyRequest + SupplyRequest_Accept → PoolShare.
+// A fully self-custody version (wallet signs both in Carpincho) needs the escrow cid
+// threaded between two signatures — clean only with a one-sig SupplyDirect (DAR).
+app.post('/v1/wallet/supply', wrap(async (req, res) => {
+  const party = String(req.body?.party ?? '').trim();
+  const amount = Number(req.body?.amount ?? 0);
+  if (!party) throw new LedgerError("'party' required", '');
+  if (!(amount > 0)) throw new LedgerError("'amount' must be positive", '');
+  const r = await led.supplyFromWallet(party, amount);
+  res.json({ status: 'supplied', supplier: party, amount, shares: r.shares });
+}));
+// public: redeem the wallet's yield position back to USDC.
+app.post('/v1/wallet/redeem', wrap(async (req, res) => {
+  const party = String(req.body?.party ?? '').trim();
+  if (!party) throw new LedgerError("'party' required", '');
+  await led.redeemFromYield(party);
+  res.json({ status: 'redeemed', supplier: party, balance: await led.usdcBalance(party) });
+}));
 
 // public: a consumer's full position — USDC balance, yield, loans, credit line.
 app.get('/v1/wallet/positions', wrap(async (req, res) => {
