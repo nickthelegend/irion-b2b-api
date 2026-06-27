@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node --import tsx --test src/*.test.ts",
     "test:e2e": "tsx src/test-b2b-e2e.ts",
+    "verify": "tsx src/verify-wallet-bnpl.ts && tsx src/verify-wallet-supply.ts && tsx src/verify-shim-signing.ts",
     "test:all": "npm run test && npm run test:e2e"
   },
   "dependencies": {
