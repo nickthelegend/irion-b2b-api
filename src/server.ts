@@ -4,7 +4,9 @@
 // Every business is a Canton party; this server holds the operator party and
 // mediates. Balances, credit, loans, and yield all live on the Canton ledger —
 // the API is a clean façade over the Irion Daml protocol.
+import './load-env.js'; // MUST be first — loads .env before modules read process.env
 import express, { type Request, type Response, type NextFunction } from 'express';
+import { resolve } from 'node:path';
 import { Ledger, LedgerError } from './canton.js';
 import * as store from './store.js';
 import { openapi } from './openapi.js';
@@ -14,9 +16,6 @@ import * as passkeys from './passkeys.js';
 import * as session from './session.js';
 import * as nbstore from './neobank-store.js';
 import * as fx from './fx.js';
-import { resolve } from 'node:path';
-
-try { process.loadEnvFile?.(resolve(import.meta.dirname, '../.env')); } catch { try { process.loadEnvFile?.('.env'); } catch { /* no .env */ } }
 const state = store.loadState();
 const led = new Ledger(store.cantonConfig(state));
 const LEDGER_URL = process.env.CANTON_JSON_API ?? 'http://localhost:6864';
