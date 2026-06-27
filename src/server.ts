@@ -13,6 +13,7 @@ import * as accounts from './accounts.js';
 import * as passkeys from './passkeys.js';
 import * as session from './session.js';
 import * as nbstore from './neobank-store.js';
+import * as fx from './fx.js';
 import { resolve } from 'node:path';
 
 try { process.loadEnvFile?.(resolve(import.meta.dirname, '../.env')); } catch { try { process.loadEnvFile?.('.env'); } catch { /* no .env */ } }
@@ -171,14 +172,13 @@ app.post('/v1/account/treasury/deposit', requireSession, wrap(async (req, res) =
   res.json({ ok: true, deposited: amount, currency, treasury: await led.treasuryMulti(acct(req).party) });
 }));
 // operator-quoted FX rates (real config values — swap a price oracle/LP in for production)
-const FX_RATES: Record<string, number> = { 'USDC:EURC': 0.92, 'EURC:USDC': 1.087, 'USDC:GBPC': 0.79, 'GBPC:USDC': 1.266, 'EURC:GBPC': 0.86, 'GBPC:EURC': 1.163 };
-app.get('/v1/account/treasury/rates', requireSession, wrap(async (_req, res) => res.json({ source: 'operator-quoted', rates: FX_RATES })));
+app.get('/v1/account/treasury/rates', requireSession, wrap(async (_req, res) => { const r = await fx.allRates(); res.json({ source: r.source, rates: r.rates }); }));
 app.post('/v1/account/treasury/rebalance', requireSession, wrap(async (req, res) => {
   const from = String(req.body?.from ?? '').toUpperCase();
   const to = String(req.body?.to ?? '').toUpperCase();
   const amount = num(req.body?.amount, 'amount');
-  const rate = FX_RATES[`${from}:${to}`];
-  if (!rate) throw new LedgerError(`no FX rate for ${from}->${to}`, '');
+  if (!fx.isCurrency(from) || !fx.isCurrency(to)) throw new LedgerError(`unknown currency ${from} or ${to}`, '');
+  const { rate } = await fx.getRate(from, to);
   const r = await led.rebalance(acct(req).party, from, to, amount, rate);
   emitAccount(acct(req), 'treasury.rebalanced', r);
   res.json({ ok: true, ...r, treasury: await led.treasuryMulti(acct(req).party) });
@@ -277,9 +277,9 @@ app.get('/v1/account/fx/quote', requireSession, wrap(async (req, res) => {
   const from = String(req.query.from ?? '').toUpperCase();
   const to = String(req.query.to ?? '').toUpperCase();
   const amount = Number(req.query.amount ?? 0);
-  const rate = FX_RATES[`${from}:${to}`];
-  if (!rate) throw new LedgerError(`no FX rate for ${from}->${to}`, '');
-  res.json({ from, to, amount, rate, receive: +(amount * rate).toFixed(2), source: 'operator-quoted' });
+  if (!fx.isCurrency(from) || !fx.isCurrency(to)) throw new LedgerError(`unknown currency ${from} or ${to}`, '');
+  const { rate, source } = await fx.getRate(from, to);
+  res.json({ from, to, amount, rate, receive: +(amount * rate).toFixed(2), source });
 }));
 
 // ---- sub-accounts / pots (each is its own platform-custodied Canton party) ----
