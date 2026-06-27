@@ -222,6 +222,34 @@ export class Ledger {
     const reqCid = this.madeLive(reqTx, 'SupplyRequest').contractId;
     await this.submit([this.cfg.operator], [this.exercise(this.tid('Irion.Pool', 'SupplyRequest'), reqCid, 'SupplyRequest_Accept', { poolCid: pool.contractId })]);
   }
+  /** Consumer (self-custody / external party) supply to the yield pool. The
+   * SUPPLIER signs the escrow transfer + the SupplyRequest (the `[supplier]`
+   * submits — in production the consumer signs these via Carpincho, exactly like
+   * the BNPL UnsecuredRequest); the operator then accepts → a PoolShare. Proves
+   * consumer supply needs NO new Daml template — the existing SupplyRequest /
+   * SupplyRequest_Accept handle it (see verify-wallet-supply.ts). */
+  async supplyFromWallet(supplier: Party, amount: number): Promise<{ shares: number }> {
+    const pool = await this.getPool();
+    const tokenCid = await this.exactHolding(supplier, amount);
+    const escrowTx = await this.submit([supplier], [this.exercise(this.tid('Irion.Token', 'Token'), tokenCid, 'Token_Transfer', { newOwner: this.cfg.operator })]);
+    const escrow = this.madeLive(escrowTx, 'Token', (a) => a.owner === this.cfg.operator).contractId;
+    const reqTx = await this.submit([supplier], [this.create(this.tid('Irion.Pool', 'SupplyRequest'), { operator: this.cfg.operator, supplier, usdcIssuer: this.cfg.usdcIssuer, amount: dec(amount), escrowCid: escrow })]);
+    const reqCid = this.madeLive(reqTx, 'SupplyRequest').contractId;
+    const acceptTx = await this.submit([this.cfg.operator], [this.exercise(this.tid('Irion.Pool', 'SupplyRequest'), reqCid, 'SupplyRequest_Accept', { poolCid: pool.contractId })]);
+    const share = this.madeLive(acceptTx, 'PoolShare', (a) => a.supplier === supplier);
+    return { shares: Number(share.createArgument.shares) };
+  }
+  /** Operator-accept half of consumer supply: accept the supplier's ALREADY-SIGNED
+   * pending SupplyRequest (created in their own wallet via Carpincho) → mint their
+   * PoolShare. Mirrors acceptUnsecuredFor for BNPL — the self-custody endpoint path. */
+  async acceptSupplyFor(supplier: Party): Promise<{ shares: number }> {
+    const pool = await this.getPool();
+    const reqs = await this.queryActive(this.cfg.operator, 'SupplyRequest', (a) => a.supplier === supplier);
+    if (!reqs.length) throw new Error('no pending SupplyRequest for this supplier — sign one in the wallet first');
+    const acceptTx = await this.submit([this.cfg.operator], [this.exercise(this.tid('Irion.Pool', 'SupplyRequest'), reqs[0].contractId, 'SupplyRequest_Accept', { poolCid: pool.contractId })]);
+    const share = this.madeLive(acceptTx, 'PoolShare', (a) => a.supplier === supplier);
+    return { shares: Number(share.createArgument.shares) };
+  }
   /** redeem a yield position back to cash (operator pays from custody). */
   async redeemFromYield(business: Party): Promise<void> {
     const shares = await this.queryActive(this.cfg.operator, 'PoolShare', (a) => a.supplier === business);
@@ -400,17 +428,21 @@ export class Ledger {
   }
 
   /** FX rebalance: swap `amount` of `from` into `to` at `rate` (bought = amount*rate).
-   * REAL on-ledger — the business sends `from` to the destination issuer's reserve
-   * and that issuer mints `to` back. Two ledger txns; a single-tx atomic FxSwap
-   * would need a dedicated Daml template (DAR rebuild). */
+   * REAL on-ledger and now ATOMIC — the sell (business sends `from` to the
+   * destination issuer's reserve) and the buy (that issuer mints `to` back) run as
+   * ONE transaction authorized by both parties (both operator-custodied), so it's
+   * all-or-nothing: a failed mint rolls the sell back. No dedicated FxSwap Daml
+   * template needed — multi-command, multi-party submission gives the atomicity. */
   async rebalance(business: Party, from: string, to: string, amount: number, rate: number) {
     const fromIssuer = this.currencyIssuer(from);
     const toIssuer = this.currencyIssuer(to);
     const bought = +(amount * rate).toFixed(2);
     const tokenCid = await this.exactHolding(business, amount, fromIssuer);
-    const sellTx = await this.submit([business], [this.exercise(this.tid('Irion.Token', 'Token'), tokenCid, 'Token_Transfer', { newOwner: toIssuer })]);
-    const mintTx = await this.submit([toIssuer], [this.create(this.tid('Irion.Token', 'Token'), { issuer: toIssuer, owner: business, amount: dec(bought) })]);
-    return { from: from.toUpperCase(), to: to.toUpperCase(), sold: amount, bought, rate, updateId: mintTx.transactionTree?.updateId ?? sellTx.transactionTree?.updateId ?? '' };
+    const tx = await this.submit([business, toIssuer], [
+      this.exercise(this.tid('Irion.Token', 'Token'), tokenCid, 'Token_Transfer', { newOwner: toIssuer }),
+      this.create(this.tid('Irion.Token', 'Token'), { issuer: toIssuer, owner: business, amount: dec(bought) }),
+    ]);
+    return { from: from.toUpperCase(), to: to.toUpperCase(), sold: amount, bought, rate, atomic: true, updateId: tx.transactionTree?.updateId ?? '' };
   }
 
   // ------------------------------------------------------------------- PAYROLL

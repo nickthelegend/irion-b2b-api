@@ -46,7 +46,7 @@ export const openapi = {
     '/v1/treasury/redeem': { post: { tags: ['Treasury'], summary: 'Redeem the yield position back to cash', responses: ok('treasury') } },
 
     '/v1/credit': { get: { tags: ['Credit'], summary: 'Credit profile (limit, score, available, outstanding)', responses: ok('profile') } },
-    '/v1/credit/request': { post: { tags: ['Credit'], summary: 'Request a credit line (platform underwrites + issues a privacy-native attestation)', requestBody: body({ approvedLimit: N, score: N }, ['approvedLimit']), responses: ok('profile') } },
+    '/v1/credit/request': { post: { tags: ['Credit'], summary: 'Underwrite a credit line — score is computed on-ledger (treasury depth + repayment history), NOT caller-supplied; optional approvedLimit only LOWERS the underwritten limit', requestBody: body({ approvedLimit: N }, []), responses: ok('profile') } },
 
     '/v1/loans': {
       get: { tags: ['Lending'], summary: 'List loans', responses: ok('loans') },

@@ -554,6 +554,22 @@ app.post('/v1/wallet/faucet', wrap(async (req, res) => {
   res.json({ party, minted: amount, balance: await led.usdcBalance(party) });
 }));
 
+// public: consumer SUPPLY (earn yield). The wallet signs (a) an escrow
+// Token_Transfer to the operator, then (b) a SupplyRequest carrying that escrow
+// cid — both in Carpincho, exactly like the BNPL UnsecuredRequest. /context gives
+// the wallet the parties it needs to build those commands; /complete has the
+// operator accept the pending SupplyRequest → a PoolShare (yield position). Uses
+// the EXISTING SupplyRequest/SupplyRequest_Accept templates — no DAR rebuild.
+app.get('/v1/wallet/supply/context', wrap(async (_req, res) => {
+  res.json({ operator: led.cfg.operator, usdcIssuer: led.cfg.usdcIssuer });
+}));
+app.post('/v1/wallet/supply/complete', wrap(async (req, res) => {
+  const party = String(req.body?.party ?? '').trim();
+  if (!party) throw new LedgerError("'party' (supplier partyId) required", '');
+  const r = await led.acceptSupplyFor(party);
+  res.json({ status: 'supplied', supplier: party, shares: r.shares });
+}));
+
 // public: a consumer's full position — USDC balance, yield, loans, credit line.
 app.get('/v1/wallet/positions', wrap(async (req, res) => {
   const party = String(req.query.party ?? '').trim();
