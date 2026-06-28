@@ -271,6 +271,19 @@ export class Ledger {
     }
     return { escrowCid, operator: this.cfg.operator, usdcIssuer: this.cfg.usdcIssuer };
   }
+  /** Demo: book external yield into the pool (Pool_InjectYield), lifting every
+   * supplier's share value. The operator mints the yield to its own custody, then
+   * raises pool NAV. Defaults to +10% of pool assets. Operator-only — works for all. */
+  async simulateYield(amount?: number): Promise<{ injected: number; poolValue: number }> {
+    const pool = await this.getPool();
+    const inject = amount && amount > 0 ? amount : Math.max(10, +(pool.totalAssets * 0.1).toFixed(2));
+    await this.fund(this.cfg.operator, inject);
+    const tokenCid = await this.exactHolding(this.cfg.operator, inject);
+    await this.submit([this.cfg.operator], [this.exercise(this.tid('Irion.Pool', 'LendingPool'), pool.contractId, 'Pool_InjectYield', { amount: dec(inject), tokenCid })]);
+    const after = await this.getPool();
+    return { injected: inject, poolValue: after.totalAssets };
+  }
+
   /** SELF-CUSTODY withdraw, step 1: the supplier's PoolShare cid for the wallet to
    * reference in a solo-signed WithdrawRequest. */
   async withdrawContext(supplier: Party): Promise<{ shareCid: ContractId; operator: Party }> {

@@ -616,6 +616,18 @@ app.post('/v1/wallet/lend/complete', wrap(async (req, res) => {
   const [t, loans, credit] = await Promise.all([led.treasury(party), led.listLoans(party), led.getProfile(party)]);
   res.json({ status: 'supplied', shares: r.shares, balance: t.cash, yield: { shares: t.yieldShares, value: t.yieldValue }, loans, credit });
 }));
+// public: simulate yield — operator books external yield into the pool (Pool_InjectYield),
+// lifting every supplier's share value. Demo button; operator-side, no wallet signature.
+app.post('/v1/wallet/yield/simulate', wrap(async (req, res) => {
+  const amount = req.body?.amount != null ? Number(req.body.amount) : undefined;
+  const r = await led.simulateYield(amount);
+  const party = String(req.body?.party ?? '').trim();
+  if (party) {
+    const t = await led.treasury(party);
+    return res.json({ status: 'yield-injected', ...r, balance: t.cash, yield: { shares: t.yieldShares, value: t.yieldValue } });
+  }
+  res.json({ status: 'yield-injected', ...r });
+}));
 // public: SELF-CUSTODY withdraw (redeem yield) — wallet solo-signs a WithdrawRequest
 // referencing its PoolShare; the operator accepts + pays from custody.
 app.post('/v1/wallet/withdraw/context', wrap(async (req, res) => {
