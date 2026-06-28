@@ -31,16 +31,23 @@ console.log('✓ Loan disbursed:', loan);
 const bal = await led.usdcBalance(borrower);
 console.log('borrower USDC balance after disbursal:', bal);
 
-// (3) Repay the loan (the path behind /v1/wallet/repay). Loan_Pay references the
-// operator-signatory ProtocolConfig + LendingPool, so the operator co-signs — a
-// wallet-only signature can't see those contracts ("prepare failed"). The
-// borrower's own token still pays.
+// (3) Repay the loan via the REAL wallet path: the borrower SOLO-signs Loan_Pay
+// (as Carpincho does), passing the ProtocolConfig + LendingPool as disclosedContracts
+// (it isn't a stakeholder on those operator contracts). This is what fixed the
+// external-party "prepare failed" — no operator co-signer, no synchronizer clash.
+const dec = (n: number) => (String(n).includes('.') ? String(n) : `${n}.0`);
 const [open] = await led.listLoans(borrower);
 console.log(`✓ repaying loan ${open.id.slice(0, 16)}… outstanding ${open.outstanding} USDC`);
-await led.repayLoan(borrower, open.id, open.outstanding);
+const ctx = await led.repayContext(borrower, open.id, open.outstanding);
+const { offset } = await led.get('/v2/state/ledger-end');
+await led.post('/v2/commands/submit-and-wait-for-transaction-tree', {
+  commandId: `verify-repay-${offset}`, userId: led.cfg.userId, actAs: [borrower], readAs: [],
+  disclosedContracts: ctx.disclosed,
+  commands: [led.exercise(led.tid('Irion.Bnpl', 'Loan'), ctx.loanCid, 'Loan_Pay', { payer: borrower, payTokenCid: ctx.payTokenCid, amount: dec(open.outstanding), poolCid: ctx.poolCid, profileCid: ctx.profileCid, configCid: ctx.configCid })],
+});
 const stillOpen = (await led.listLoans(borrower)).filter((l: any) => l.outstanding > 0).length;
 console.log('open loans after repay:', stillOpen);
 
 console.log(bal >= 25 && stillOpen === 0
-  ? '✅ END-TO-END BNPL VERIFIED (borrow + repay, operator co-signed)'
+  ? '✅ END-TO-END BNPL VERIFIED (borrow + wallet-solo repay via disclosed contracts)'
   : '❌ borrow/repay did not settle correctly');

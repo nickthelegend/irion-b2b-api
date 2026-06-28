@@ -349,7 +349,9 @@ export class Ledger {
 
   /** The cids a wallet needs to self-sign `Loan_Pay` (repay): the loan, a USDC
    * token the borrower owns covering `amount` (Loan_Pay splits it internally), and
-   * the pool/profile/config. */
+   * the pool/profile/config. Also returns `disclosed` — the ProtocolConfig +
+   * LendingPool created-event blobs the (external) wallet must pass as
+   * disclosedContracts, since it isn't a stakeholder on those operator contracts. */
   async repayContext(borrower: Party, loanCid: ContractId, amount: number) {
     const pool = await this.getPool();
     const [profile] = await this.queryActive(this.cfg.operator, 'CreditProfile', (a) => a.borrower === borrower);
@@ -357,7 +359,24 @@ export class Ledger {
     const configCid = await this.configCid();
     const toks = (await this.tokensOf(borrower)).filter((t) => t.amount >= amount).sort((a, b) => a.amount - b.amount);
     if (!toks.length) throw new Error('insufficient USDC to repay — use the faucet first');
-    return { loanCid, payTokenCid: toks[0].contractId, poolCid: pool.contractId, profileCid: profile.contractId, configCid };
+    const disclosed = await this.disclosedContracts([pool.contractId, configCid]);
+    return { loanCid, payTokenCid: toks[0].contractId, poolCid: pool.contractId, profileCid: profile.contractId, configCid, disclosed };
+  }
+
+  /** Created-event blobs for operator contracts a non-stakeholder (external wallet)
+   * party must reference — passed as `disclosedContracts` so its solo submission
+   * can resolve them. */
+  private async disclosedContracts(cids: ContractId[]): Promise<unknown[]> {
+    const { offset } = await this.get('/v2/state/ledger-end');
+    const res = await this.post('/v2/state/active-contracts', {
+      filter: { filtersByParty: { [this.cfg.operator]: { cumulative: [{ identifierFilter: { WildcardFilter: { value: { includeCreatedEventBlob: true } } } }] } } },
+      verbose: false, activeAtOffset: offset,
+    });
+    const created = (res as any[]).map((e) => e.contractEntry?.JsActiveContract?.createdEvent).filter(Boolean);
+    return cids.map((cid) => {
+      const e = created.find((x: any) => x.contractId === cid);
+      return e ? { templateId: e.templateId, contractId: e.contractId, createdEventBlob: e.createdEventBlob } : null;
+    }).filter(Boolean);
   }
 
   async listLoans(business: Party) {
