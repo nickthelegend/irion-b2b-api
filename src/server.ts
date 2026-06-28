@@ -606,6 +606,20 @@ app.post('/v1/wallet/repay/context', wrap(async (req, res) => {
   if (!(amount > 0)) throw new LedgerError("'amount' must be positive", '');
   res.json(await led.repayContext(party, loanId, amount));
 }));
+// public: repay a loan. Loan_Pay must reference the ProtocolConfig + LendingPool,
+// which are operator-signatory contracts the borrower can't see — so a wallet-only
+// (Carpincho) signature can't resolve them ("prepare failed"). The operator
+// co-signs here (the borrower's own token still pays), exactly like B2B repay.
+app.post('/v1/wallet/repay', wrap(async (req, res) => {
+  const party = String(req.body?.party ?? '').trim();
+  const loanId = String(req.body?.loanId ?? '').trim();
+  const amount = Number(req.body?.amount ?? 0);
+  if (!party || !loanId) throw new LedgerError("'party' and 'loanId' required", '');
+  if (!(amount > 0)) throw new LedgerError("'amount' must be positive", '');
+  await led.repayLoan(party, loanId, amount);
+  const [t, loans, credit] = await Promise.all([led.treasury(party), led.listLoans(party), led.getProfile(party)]);
+  res.json({ status: 'repaid', party, balance: t.cash, yield: { shares: t.yieldShares, value: t.yieldValue }, loans, credit });
+}));
 
 // public: read a payment link (for the /pay page)
 app.get('/pay-links/:id', wrap(async (req, res) => {
