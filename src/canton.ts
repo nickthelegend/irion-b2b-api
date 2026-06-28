@@ -250,6 +250,44 @@ export class Ledger {
     const share = this.madeLive(acceptTx, 'PoolShare', (a) => a.supplier === supplier);
     return { shares: Number(share.createArgument.shares) };
   }
+  /** SELF-CUSTODY lend, step 1: pick a consumer token (>= amount) for the wallet to
+   * transfer whole to the operator. Change is refunded in step 2. */
+  async lendSource(supplier: Party, amount: number): Promise<{ sourceTokenCid: ContractId; sourceAmount: number; operator: Party; usdcIssuer: Party }> {
+    const toks = (await this.tokensOf(supplier)).filter((t) => t.amount >= amount).sort((a, b) => a.amount - b.amount);
+    if (!toks.length) throw new Error('insufficient USDC to lend — use the faucet first');
+    return { sourceTokenCid: toks[0].contractId, sourceAmount: toks[0].amount, operator: this.cfg.operator, usdcIssuer: this.cfg.usdcIssuer };
+  }
+  /** Lend step 2 (after the wallet transferred `sourceAmount` to the operator):
+   * carve an EXACT `amount` operator-owned escrow (what SupplyRequest_Accept requires)
+   * and refund the change to the supplier. Returns the escrowCid the wallet then puts
+   * in its SupplyRequest. Tokens are fungible, so the operator carves from its own
+   * (now larger) balance — no need to identify the exact received contract. */
+  async lendEscrow(supplier: Party, amount: number, sourceAmount: number): Promise<{ escrowCid: ContractId; operator: Party; usdcIssuer: Party }> {
+    const escrowCid = await this.exactHolding(this.cfg.operator, amount);
+    const change = +(sourceAmount - amount).toFixed(2);
+    if (change > 0.000001) {
+      const refundCid = await this.exactHolding(this.cfg.operator, change);
+      await this.submit([this.cfg.operator], [this.exercise(this.tid('Irion.Token', 'Token'), refundCid, 'Token_Transfer', { newOwner: supplier })]);
+    }
+    return { escrowCid, operator: this.cfg.operator, usdcIssuer: this.cfg.usdcIssuer };
+  }
+  /** SELF-CUSTODY withdraw, step 1: the supplier's PoolShare cid for the wallet to
+   * reference in a solo-signed WithdrawRequest. */
+  async withdrawContext(supplier: Party): Promise<{ shareCid: ContractId; operator: Party }> {
+    const [share] = await this.queryActive(this.cfg.operator, 'PoolShare', (a) => a.supplier === supplier);
+    if (!share) throw new Error('no yield position to withdraw');
+    return { shareCid: share.contractId, operator: this.cfg.operator };
+  }
+  /** Withdraw step 2: accept the wallet's pending WithdrawRequest → pay USDC from custody. */
+  async acceptWithdrawFor(supplier: Party): Promise<void> {
+    const pool = await this.getPool();
+    const reqs = await this.queryActive(this.cfg.operator, 'WithdrawRequest', (a) => a.supplier === supplier);
+    if (!reqs.length) throw new Error('no pending WithdrawRequest — sign one in the wallet first');
+    const [share] = await this.queryActive(this.cfg.operator, 'PoolShare', (a) => a.supplier === supplier);
+    const amount = share ? (Number(share.createArgument.shares) * pool.totalAssets) / (pool.totalShares || 1) : 0;
+    const payTokenCid = await this.operatorHolding(Math.max(amount, 0.000001));
+    await this.submit([this.cfg.operator], [this.exercise(this.tid('Irion.Pool', 'WithdrawRequest'), reqs[0].contractId, 'WithdrawRequest_Accept', { poolCid: pool.contractId, payTokenCid })]);
+  }
   /** redeem a yield position back to cash (operator pays from custody). */
   async redeemFromYield(business: Party): Promise<void> {
     const shares = await this.queryActive(this.cfg.operator, 'PoolShare', (a) => a.supplier === business);

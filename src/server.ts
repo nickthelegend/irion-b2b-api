@@ -589,6 +589,48 @@ app.post('/v1/wallet/redeem', wrap(async (req, res) => {
   res.json({ status: 'redeemed', supplier: party, balance: await led.usdcBalance(party) });
 }));
 
+// public: SELF-CUSTODY lend (earn yield) — works for external Carpincho wallets.
+// Two wallet (solo) signatures: (1) transfer a token whole to the operator, then
+// (2) sign a SupplyRequest referencing the operator-carved escrow. The operator
+// can't submit AS an external party (NO_SYNCHRONIZER), so it never co-signs; it only
+// carves the exact escrow + refunds change (step /escrow) and accepts (step /complete).
+app.post('/v1/wallet/lend/context', wrap(async (req, res) => {
+  const party = String(req.body?.party ?? '').trim();
+  const amount = Number(req.body?.amount ?? 0);
+  if (!party) throw new LedgerError("'party' required", '');
+  if (!(amount > 0)) throw new LedgerError("'amount' must be positive", '');
+  res.json(await led.lendSource(party, amount));
+}));
+app.post('/v1/wallet/lend/escrow', wrap(async (req, res) => {
+  const party = String(req.body?.party ?? '').trim();
+  const amount = Number(req.body?.amount ?? 0);
+  const sourceAmount = Number(req.body?.sourceAmount ?? 0);
+  if (!party) throw new LedgerError("'party' required", '');
+  if (!(amount > 0) || !(sourceAmount >= amount)) throw new LedgerError("invalid amounts", '');
+  res.json(await led.lendEscrow(party, amount, sourceAmount));
+}));
+app.post('/v1/wallet/lend/complete', wrap(async (req, res) => {
+  const party = String(req.body?.party ?? '').trim();
+  if (!party) throw new LedgerError("'party' required", '');
+  const r = await led.acceptSupplyFor(party);
+  const [t, loans, credit] = await Promise.all([led.treasury(party), led.listLoans(party), led.getProfile(party)]);
+  res.json({ status: 'supplied', shares: r.shares, balance: t.cash, yield: { shares: t.yieldShares, value: t.yieldValue }, loans, credit });
+}));
+// public: SELF-CUSTODY withdraw (redeem yield) — wallet solo-signs a WithdrawRequest
+// referencing its PoolShare; the operator accepts + pays from custody.
+app.post('/v1/wallet/withdraw/context', wrap(async (req, res) => {
+  const party = String(req.body?.party ?? '').trim();
+  if (!party) throw new LedgerError("'party' required", '');
+  res.json(await led.withdrawContext(party));
+}));
+app.post('/v1/wallet/withdraw/complete', wrap(async (req, res) => {
+  const party = String(req.body?.party ?? '').trim();
+  if (!party) throw new LedgerError("'party' required", '');
+  await led.acceptWithdrawFor(party);
+  const [t, loans, credit] = await Promise.all([led.treasury(party), led.listLoans(party), led.getProfile(party)]);
+  res.json({ status: 'withdrawn', balance: t.cash, yield: { shares: t.yieldShares, value: t.yieldValue }, loans, credit });
+}));
+
 // public: a consumer's full position — USDC balance, yield, loans, credit line.
 app.get('/v1/wallet/positions', wrap(async (req, res) => {
   const party = String(req.query.party ?? '').trim();
